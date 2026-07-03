@@ -15,7 +15,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from depth_model import AVAILABLE_MODELS, load_depth_model
-from sbs.sbs import process_image_sbs
+from sbs.sbs import process_image_sbs, process_image_anaglyph
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
@@ -140,6 +140,32 @@ def make_sbs(original, depth_map, sbs_method, depth_scale, sbs_mode, sbs_blur, d
     return transforms.ToPILImage()(sbs_tensor.squeeze(0).cpu().permute(2, 0, 1))
 
 
+def make_anaglyph(original, depth_map, sbs_method, depth_scale, sbs_blur,
+                  convergence, device):
+    """Build a red-cyan anaglyph from original photo and depth map."""
+    to_tensor = transforms.ToTensor()
+
+    base_image   = to_tensor(original.convert("RGB")).permute(1, 2, 0).unsqueeze(0)
+    depth_tensor = to_tensor(depth_map).permute(1, 2, 0).unsqueeze(0)
+
+    stereo_dtype = torch.float32 if device.type == "cpu" else torch.float16
+    base_image   = base_image.to(device=device, dtype=stereo_dtype)
+    depth_tensor = depth_tensor.to(device=device, dtype=stereo_dtype)
+
+    if sbs_blur % 2 == 0:
+        sbs_blur += 1
+
+    ana_tensor = process_image_anaglyph(
+        base_image=base_image,
+        depth_map=depth_tensor,
+        method=sbs_method,
+        depth_scale=depth_scale,
+        depth_blur_strength=sbs_blur,
+        convergence=convergence,
+    )
+    return transforms.ToPILImage()(ana_tensor.squeeze(0).cpu().permute(2, 0, 1))
+
+
 def convert_one(
     model,
     image_path,
@@ -154,6 +180,8 @@ def convert_one(
     depth_scale,
     sbs_mode,
     sbs_blur,
+    output_format="sbs",   # "sbs", "anaglyph", or "both"
+    convergence=0.5,
     log=print,
 ):
     name, ext = os.path.splitext(os.path.basename(image_path))
@@ -173,9 +201,16 @@ def convert_one(
         depth_map.save(out_path)
         return True
 
-    sbs_image = make_sbs(image, depth_map, sbs_method, depth_scale, sbs_mode, sbs_blur, device)
-    out_path = os.path.join(output_dir, f"{name}_sbs{ext}")
-    sbs_image.save(out_path)
+    if output_format in ("sbs", "both"):
+        sbs_image = make_sbs(image, depth_map, sbs_method, depth_scale,
+                             sbs_mode, sbs_blur, device)
+        sbs_image.save(os.path.join(output_dir, f"{name}_sbs{ext}"))
+
+    if output_format in ("anaglyph", "both"):
+        ana_image = make_anaglyph(image, depth_map, sbs_method, depth_scale,
+                                  sbs_blur, convergence, device)
+        ana_image.save(os.path.join(output_dir, f"{name}_anaglyph{ext}"))
+
     return True
 
 
@@ -386,6 +421,10 @@ def main():
     parser.add_argument("--sbs-mode", choices=["parallel", "cross-eyed"], default="parallel",
                         help="Use parallel for VR headsets like Meta Quest.")
     parser.add_argument("--sbs-blur", type=int, default=7, help="Depth blur (odd number, 3-15).")
+    parser.add_argument("--output-format", choices=["sbs", "anaglyph", "both"], default="sbs",
+                        help="sbs = side-by-side (VR headsets), anaglyph = red-cyan glasses, both = save both.")
+    parser.add_argument("--convergence", type=float, default=0.5,
+                        help="Anaglyph zero-disparity plane (0.0–1.0). 0.5 = midpoint, higher = push into screen.")
     # Video-specific options
     parser.add_argument("--video", action="store_true", help="Treat input as video (use per-frame processing).")
     parser.add_argument("--video-encoder", choices=["vits", "vitb", "vitl"], default="vits",
@@ -544,6 +583,8 @@ def main():
                     depth_scale=args.depth_scale,
                     sbs_mode=args.sbs_mode,
                     sbs_blur=args.sbs_blur,
+                    output_format=args.output_format,
+                    convergence=args.convergence,
                     log=pbar.write,
                 ):
                     ok += 1
@@ -551,7 +592,10 @@ def main():
 
         print(f"\nDone. {ok}/{len(images)} succeeded.")
         if not args.depth_only:
-            print("Load the *_sbs.png files on your Quest (Skybox, Pigasus, etc.) in side-by-side 3D mode.")
+            if args.output_format in ("sbs", "both"):
+                print("Load the *_sbs files on your Quest (Skybox, Pigasus, etc.) in side-by-side 3D mode.")
+            if args.output_format in ("anaglyph", "both"):
+                print("View *_anaglyph files with red-cyan 3D glasses.")
 
 
 if __name__ == "__main__":

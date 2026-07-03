@@ -55,6 +55,10 @@ Two tabs:
 python convert.py --input photo.jpg --output-dir output --yes
 python convert.py --input ~/Pictures/batch --output-dir output --yes
 
+# Red-cyan anaglyph, or both output formats
+python convert.py --input photo.jpg --output-dir output --output-format anaglyph --convergence 0.5 --yes
+python convert.py --input photo.jpg --output-dir output --output-format both --yes
+
 # Video
 python convert.py --input movie.mp4 --output-dir output --video-encoder vits --yes
 
@@ -64,6 +68,8 @@ sh sbs.sh
 
 Video encoder choices: `vits` (fast, default), `vitb` (balanced), `vitl` (best quality).
 Image model is selected the same way via `--model`; see `--help` for all options.
+Anaglyph output currently applies to images; `--convergence` controls which depth
+plane appears at screen level when viewed through red-cyan glasses.
 
 ## Image QC (CLI)
 

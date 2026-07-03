@@ -296,6 +296,76 @@ def process_image_sbs(
     return _sbs_mesh_warping(device, base_image, depth_map, depth_scale, mode, depth_blur_strength)
 
 
+def process_image_anaglyph(
+    base_image: torch.Tensor,
+    depth_map: torch.Tensor,
+    method: str = "mesh_warping",
+    depth_scale: int = 40,
+    depth_blur_strength: int = 7,
+    convergence: float = 0.5,
+) -> torch.Tensor:
+    """Convert a single image to a red-cyan anaglyph.
+
+    Produces a single composite image where the left-eye view is encoded in
+    the red channel and the right-eye view is encoded in the cyan (green +
+    blue) channels.  Requires red-cyan 3D glasses to view.
+
+    The ``convergence`` parameter shifts the zero-disparity plane — the depth
+    at which objects appear to sit exactly on the screen:
+
+    =========  ============================================================
+    0.0        Far objects (depth = 0) appear at screen depth.
+    0.5        Mid-depth objects appear at screen depth (balanced default).
+    1.0        Near objects (depth = 1) appear at screen depth.
+    =========  ============================================================
+
+    Higher convergence values push the 3D effect "into" the screen, lower
+    values pull it "out".  Portraits typically benefit from 0.6–0.8;
+    landscapes from 0.3–0.5.
+
+    Args:
+        base_image: ``[B, H, W, C]`` float tensor in ``[0, 1]``.
+        depth_map: Depth map tensor.
+        method: ``"mesh_warping"`` or ``"grid_sampling"``.
+        depth_scale: Stereo strength.
+        depth_blur_strength: Depth-map smoothing kernel size (odd, 3–15).
+        convergence: Zero-disparity plane (0.0–1.0+, default 0.5).
+
+    Returns:
+        Anaglyph tensor ``[B, H, W, 3]`` with values in ``[0, 1]``.
+    """
+    device = base_image.device
+
+    # Render separate left and right eye views using the standard SBS path.
+    renderer = _sbs_grid_sampling if method == "grid_sampling" else _sbs_mesh_warping
+    sbs = renderer(device, base_image, depth_map, depth_scale, "parallel", depth_blur_strength)
+    if isinstance(sbs, tuple):
+        sbs = sbs[0]
+    # sbs: [B, H, W*2, C] — left half is left eye, right half is right eye.
+    W2 = sbs.shape[2] // 2
+    left  = sbs[:, :, :W2,  :].permute(0, 3, 1, 2)   # [B, C, H, W]
+    right = sbs[:, :,  W2:, :].permute(0, 3, 1, 2)
+
+    # Apply convergence offset: shift both views horizontally so that the
+    # chosen depth plane aligns at centre.  Positive shift = pull nearer.
+    if convergence != 0.5:
+        shift_px = int((convergence - 0.5) * depth_scale)
+        if shift_px != 0:
+            left  = torch.roll(left,  -shift_px, dims=3)
+            right = torch.roll(right,  shift_px, dims=3)
+
+    # Convert views to greyscale for luminance-preserving anaglyph.
+    # Rec. 709 luma weights.
+    weights = torch.tensor([0.2126, 0.7152, 0.0722],
+                            device=device, dtype=left.dtype)
+    left_gray  = (left  * weights.view(1, 3, 1, 1)).sum(dim=1, keepdim=True)
+    right_gray = (right * weights.view(1, 3, 1, 1)).sum(dim=1, keepdim=True)
+
+    # Red channel from left eye; green + blue from right eye.
+    anaglyph = torch.cat([left_gray, right_gray, right_gray], dim=1)
+    return anaglyph.permute(0, 2, 3, 1).clamp(0, 1)   # [B, H, W, 3]
+
+
 def process_video_sbs(
     frames: torch.Tensor,
     depth_maps: torch.Tensor,
