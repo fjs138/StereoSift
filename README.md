@@ -19,6 +19,39 @@ required. Models download automatically on first use.
 - Safe QC mode that copies originals by default; move only when explicitly requested
 - Optional OpenAI-compatible vision backend (LM Studio, Ollama) for QC
 
+## Key Technologies
+
+StereoSift is built upon a robust and modern technology stack, leveraging cutting-edge deep learning models and efficient Python libraries to deliver its functionality.
+
+### Libraries and Frameworks
+
+| Technology | Role |
+| :------------------- | :---------------------------------------------------------------------- |
+| `Python 3.10+` | Core programming language |
+| `PyTorch` | Primary deep learning framework for model inference |
+| `CustomTkinter` | Modern GUI framework for the desktop application |
+| `transformers` | Facilitates loading and interaction with Hugging Face models like Moondream2 |
+| `ultralytics` | Powers YOLO (You Only Look Once) object detection |
+| `Pillow` | Image processing library |
+| `numpy` | Fundamental package for numerical computing |
+| `imageio` | Cross-platform library for reading and writing image and video data |
+| `imageio-ffmpeg` | Provides FFmpeg integration for video processing |
+| `opencv-python` | Computer vision library for image and video manipulation |
+| `huggingface_hub` | Manages model downloads and caches from Hugging Face |
+| `requests` | Handles HTTP requests for optional vision backend integration |
+| `tqdm` | Provides fast, extensible progress bars for loops |
+| `einops` | Flexible and powerful tensor operations for deep learning |
+| `easydict` | Enables attribute-style access to dicts (e.g., `dict.key`) |
+
+### Models and AI Components
+
+| Model / Component | Type | Role |
+| :--------------------- | :--------------------------------------- | :------------------------------------------------------------------------------------------------------- |
+| `Depth Anything V2` | State-of-the-art Monocular Depth Estimation | Generates high-quality depth maps for 2D to SBS 3D image conversion |
+| `Video Depth Anything` | Video Depth Estimation | Extends `Depth Anything V2` to provide consistent depth estimation for video, enabling SBS 3D video conversion |
+| `YOLO11n` | Object Detection Model | Detects persons and objects, used in the QC pipeline to identify content and trigger deep scans |
+| `Moondream2` | Vision-Language Model | Performs advanced anatomical deep scans in the QC pipeline to identify defects like fused body parts, extra limbs, and malformed features |
+
 ## Installation
 
 Requires Python 3.10+ and FFmpeg (supplied via `imageio-ffmpeg`).
@@ -96,9 +129,9 @@ explicitly desired.
 
 | Layer | Model | What it catches |
 |---|---|---|
-| Pixel checks | None | Dark/bright exposure, low/high contrast |
+| Pixel metrics | None | Records exposure/contrast for reference; does not affect judgment |
 | Object detection | YOLO11n (~6 MB) | Person presence, object count |
-| Structure deep scan | moondream2 (~2 GB) | Fused structure, doubled heads, extra/missing limbs, malformed hands |
+| Structure deep scan | moondream2 (~2 GB) | Clear extra heads/torsos/arms/legs and fused bodies |
 
 YOLO and moondream2 download automatically on first use. moondream2 only runs
 on images containing people unless `--scan-all` is passed.

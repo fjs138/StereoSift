@@ -68,12 +68,12 @@ _MOONDREAM_REVISION = "2025-01-09"   # pinned for reproducibility
 
 # Structure-check prompt sent to moondream2.
 _STRUCTURE_PROMPT = (
-    "Look carefully at this image. "
-    "Are there any of the following problems: "
-    "two heads on one body, duplicate or fused body parts, extra limbs, "
-    "missing limbs that should be visible, malformed hands or fingers, "
-    "bodies merged together, or any other clear anatomical defect? "
-    "Reply with YES or NO followed by a brief description of any problem found."
+    "Judge only major duplicated or incorrectly joined human body structure. "
+    "FAIL only for a clearly extra head, a second torso sharing one lower body, "
+    "an extra arm or leg beyond a plausible human body, or visibly fused people/bodies. "
+    "Do not fail for hidden or cropped limbs, hands or fingers, pose, clothing, lighting, "
+    "blur, artistic style, or minor visual imperfections. "
+    "Reply exactly as one of: PASS; FAIL: <brief reason>; UNCERTAIN: <brief reason>."
 )
 
 
@@ -175,14 +175,15 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     img = Image.open(image_path).convert("RGB")
 
     # Use the query() API directly — cleaner than encode_image + answer_question.
-    result = model.query(img, _STRUCTURE_PROMPT)
+    result = model.query(img, _STRUCTURE_PROMPT)  # type: ignore
     answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
 
-    first_word = answer.split()[0].upper().rstrip(".,:")
-    structure_ok = first_word == "NO"
+    first_word = answer.split()[0].upper().rstrip(".,:") if answer else "UNCERTAIN"
+    verdict = first_word if first_word in {"PASS", "FAIL", "UNCERTAIN"} else "UNCERTAIN"
 
     return {
-        "structure_ok":   structure_ok,
+        "verdict":      verdict.lower(),
+        "structure_ok":   verdict == "PASS",
         "structure_note": answer,
         "raw":          answer,
     }
@@ -228,13 +229,13 @@ class QCSettings:
         score_warn: float = 50.0,
         # Feature toggles
         use_yolo: bool = True,
-        use_deep_scan: bool = False,   # moondream2
-        deep_scan_persons_only: bool = True,  # only scan images with people
+        use_deep_scan: bool = True,   # moondream2
+        deep_scan_persons_only: bool = False,
         # Deep-scan strictness
         # "strict"  → any structure note = fail
         # "balanced"→ any structure note = warning, strong language = fail
         # "relaxed" → only fail on very explicit problems
-        deep_scan_strictness: str = "balanced",
+        deep_scan_strictness: str = "relaxed",
     ):
         self.brightness_dark_fail    = brightness_dark_fail
         self.brightness_dark_warn    = brightness_dark_warn
@@ -280,7 +281,6 @@ def classify_image(
         settings = _DEFAULT_SETTINGS
 
     issues: list[str] = []
-    score  = 100.0
     person_count = 0
     detections: list[str] = []
     structure_note = ""
@@ -290,26 +290,8 @@ def classify_image(
     brightness = stats["brightness"]
     contrast   = stats["contrast"]
 
-    if brightness < settings.brightness_dark_fail:
-        issues.append("very dark / underexposed")
-        score -= 25
-    elif brightness < settings.brightness_dark_warn:
-        issues.append("dark exposure")
-        score -= 10
-
-    if brightness > settings.brightness_bright_fail:
-        issues.append("very bright / overexposed")
-        score -= 25
-    elif brightness > settings.brightness_bright_warn:
-        issues.append("bright exposure")
-        score -= 10
-
-    if contrast < settings.contrast_low_fail:
-        issues.append("low contrast")
-        score -= 12
-    elif contrast > settings.contrast_high_warn:
-        issues.append("high contrast / harsh")
-        score -= 8
+    # Exposure and contrast are recorded for diagnostics only. They do not
+    # influence structural-structure judgment.
 
     # ── 2. YOLO detection ─────────────────────────────────────────────────────
     if settings.use_yolo:
@@ -317,8 +299,8 @@ def classify_image(
             yolo = _run_yolo(image_path)
             person_count = yolo["person_count"]
             detections   = yolo["detections"]
-        except Exception as exc:
-            issues.append(f"YOLO skipped ({exc})")
+        except Exception:
+            pass
 
     # ── 3. Moondream2 deep scan ───────────────────────────────────────────────
     run_deep = (
@@ -330,41 +312,24 @@ def classify_image(
             scan = _run_moondream(image_path)
             structure_note = scan["structure_note"]
 
-            if not scan["structure_ok"]:
-                note_lower = structure_note.lower()
-                # Escalate to fail for explicit severe problems.
-                severe = any(kw in note_lower for kw in (
-                    "two head", "duplicate head", "extra head",
-                    "fused", "merged bod", "extra limb", "three arm",
-                    "three leg", "malformed",
-                ))
-                if settings.deep_scan_strictness == "strict" or severe:
-                    issues.append(f"structure defect: {structure_note}")
-                    score -= 45
-                elif settings.deep_scan_strictness == "balanced":
-                    issues.append(f"possible structure issue: {structure_note}")
-                    score -= 20
-                else:  # relaxed
-                    if severe:
-                        issues.append(f"structure defect: {structure_note}")
-                        score -= 45
-                    # otherwise ignore
+            verdict = scan.get("verdict", "pass" if scan["structure_ok"] else "uncertain")
+            if verdict == "fail":
+                issues.append(f"major structure defect: {structure_note}")
+            elif verdict == "uncertain":
+                issues.append(f"uncertain structure: {structure_note}")
         except Exception as exc:
             issues.append(f"deep scan skipped ({exc})")
 
     # ── Final verdict ─────────────────────────────────────────────────────────
-    score = max(0.0, min(100.0, score))
-
-    if score >= settings.score_pass:
-        status = "pass"
-    elif score >= settings.score_warn:
+    if any("major structure defect" in issue for issue in issues):
+        status = "fail"
+        score = 0.0
+    elif any("uncertain structure" in issue or "deep scan skipped" in issue for issue in issues):
         status = "warning"
+        score = 50.0
     else:
-        status = "fail"
-
-    # Hard fail on confirmed severe structure regardless of score.
-    if any("structure defect" in i for i in issues):
-        status = "fail"
+        status = "pass"
+        score = 100.0
 
     os.makedirs(output_dir, exist_ok=True)
     for folder in ("pass", "warning", "fail"):
@@ -397,7 +362,7 @@ def _serve_image_url(image_path: str, max_side: int = 512) -> tuple:
     out  = os.path.join(tmp, name)
     with Image.open(image_path) as img:
         img = img.convert("RGB")
-        img.thumbnail((max_side, max_side), Image.LANCZOS)
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         img.save(out, format="JPEG", quality=85)
     handler = partial(SimpleHTTPRequestHandler, directory=tmp)
     server  = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -594,10 +559,10 @@ def main() -> None:
     p.add_argument("--output-dir",   default="output/qc")
     p.add_argument("--backend-url",  default=None)
     p.add_argument("--model",        default="llama-3.2-11b-vision-instruct")
-    p.add_argument("--deep-scan",    action="store_true",
-                   help="Enable moondream2 structure scan")
-    p.add_argument("--scan-all",     action="store_true",
-                   help="Deep-scan non-person images too")
+    p.add_argument("--deep-scan", dest="deep_scan", action="store_true", default=True,
+                   help="Enable moondream2 structure scan (default)")
+    p.add_argument("--no-deep-scan", dest="deep_scan", action="store_false",
+                   help="Disable moondream2 and run detection metadata only")
     p.add_argument("--strictness",   default="balanced",
                    choices=["relaxed", "balanced", "strict"])
     p.add_argument("--no-yolo",      action="store_true")
@@ -607,7 +572,7 @@ def main() -> None:
     settings = QCSettings(
         use_yolo=not args.no_yolo,
         use_deep_scan=args.deep_scan,
-        deep_scan_persons_only=not args.scan_all,
+        deep_scan_persons_only=False,
         deep_scan_strictness=args.strictness,
     )
     run_qc(args.input, args.output_dir,
