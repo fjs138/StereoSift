@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """Image quality-control pipeline.
 
-Primary path: local YOLO-based inference via PyTorch (no server required).
-  - ``yolo11n.pt``      — object detection, catches exposure/blur/clutter
-  - ``yolo11n-pose.pt`` — pose estimation, counts heads/faces/keypoints to
-                          flag duplicate structure and missing body parts
+Two complementary local checks, both running through PyTorch with no server:
 
-Both checkpoints (~6 MB each) are downloaded automatically from the
-Ultralytics CDN on first use and cached in ``models/yolo/``.
+1. Pixel heuristics (always)
+   Exposure, brightness, contrast — fast, zero model dependencies.
 
-Optional path: OpenAI-compatible vision backend (LM Studio, Ollama, etc.).
-Pass ``backend_url`` to ``run_qc`` or ``classify_image_with_backend`` to use
-this instead.  Useful for richer natural-language reasoning about artifacts.
+2. YOLO object detection (optional, enabled by default)
+   ``yolo11n.pt`` (~6 MB, auto-downloaded to ``models/yolo/``)
+   Detects persons and objects. Honest scope: reports person count and
+   detected object classes. Does NOT claim to detect fused figures —
+   YOLO pose produces one skeleton per person instance and cannot reliably
+   flag two heads on one body.
 
-Pixel-only fallback: if Ultralytics is not installed the pipeline falls back
-to brightness/contrast/edge heuristics with no model dependency.
+3. Moondream2 deep scan (optional, off by default)
+   ``vikhyatk/moondream2`` (~2 GB, cached by HuggingFace on first use)
+   A small vision-language model that looks at the whole image and reasons
+   about it holistically. Catches what YOLO cannot: fused figures, extra
+   limbs, doubled heads on one torso, malformed hands, visual glitches.
+   Only runs on images that contain people (per YOLO) or when
+   ``deep_scan_all=True``.
 
-Output structure
-----------------
-Each run writes copies (or moves) of images into::
+Optional fourth path: OpenAI-compatible vision backend (LM Studio, Ollama).
+Pass ``backend_url`` to replace the local moondream2 scan with an API call.
 
-    <output_dir>/pass/
-    <output_dir>/warning/
-    <output_dir>/fail/
-    <output_dir>/report.json
+Output
+------
+``<output_dir>/pass/``, ``warning/``, ``fail/``, ``report.json``
 """
 
 from __future__ import annotations
@@ -47,10 +50,10 @@ except ImportError:
     requests = None
 
 try:
-    from PIL import Image, ImageFilter
+    from PIL import Image
 except ImportError:
     Image = None
-    ImageFilter = None
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,136 +61,141 @@ except ImportError:
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
-# Local cache directory for YOLO checkpoints (alongside depth models).
-_YOLO_MODEL_DIR = Path(__file__).parent / "models" / "yolo"
+_YOLO_DIR          = Path(__file__).parent / "models" / "yolo"
+_YOLO_DETECT_FILE  = "yolo11n.pt"
+_MOONDREAM_REPO    = "vikhyatk/moondream2"
+_MOONDREAM_REVISION = "2025-01-09"   # pinned for reproducibility
 
-# YOLO model filenames.
-_YOLO_DETECT_MODEL = "yolo11n.pt"
-_YOLO_POSE_MODEL   = "yolo11n-pose.pt"
-
-# Structure anomaly thresholds.
-# More than this many people detected with unexpected keypoint counts → warning/fail.
-_MAX_HEADS_PER_PERSON = 1   # nose keypoints per detected person
-_POSE_CONF_THRESHOLD  = 0.4  # minimum keypoint confidence to count
+# Structure-check prompt sent to moondream2.
+_STRUCTURE_PROMPT = (
+    "Look carefully at this image. "
+    "Are there any of the following problems: "
+    "two heads on one body, duplicate or fused body parts, extra limbs, "
+    "missing limbs that should be visible, malformed hands or fingers, "
+    "bodies merged together, or any other clear anatomical defect? "
+    "Reply with YES or NO followed by a brief description of any problem found."
+)
 
 
 # ---------------------------------------------------------------------------
-# YOLO model loading (lazy, cached per process)
+# Model caches (process-level singletons)
 # ---------------------------------------------------------------------------
 
-_yolo_detect_cache: Any = None
-_yolo_pose_cache:   Any = None
+_yolo_detect_cache: Any   = None
+_moondream_cache:   tuple | None = None   # (model, tokenizer)
 
+
+# ---------------------------------------------------------------------------
+# YOLO
+# ---------------------------------------------------------------------------
 
 def _get_yolo_detect():
-    """Return the cached detection model, downloading if needed."""
     global _yolo_detect_cache
     if _yolo_detect_cache is None:
-        _yolo_detect_cache = _load_yolo(_YOLO_DETECT_MODEL)
+        _yolo_detect_cache = _load_yolo(_YOLO_DETECT_FILE)
     return _yolo_detect_cache
 
 
-def _get_yolo_pose():
-    """Return the cached pose model, downloading if needed."""
-    global _yolo_pose_cache
-    if _yolo_pose_cache is None:
-        _yolo_pose_cache = _load_yolo(_YOLO_POSE_MODEL)
-    return _yolo_pose_cache
-
-
 def _load_yolo(filename: str):
-    """Load a YOLO model, downloading to ``models/yolo/`` if absent."""
+    """Load YOLO, downloading to ``models/yolo/`` if not present."""
     from ultralytics import YOLO
-    _YOLO_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    path = _YOLO_MODEL_DIR / filename
-    # Ultralytics downloads automatically when given just a filename,
-    # but we want it stored in our models dir, so copy it there if needed.
+    _YOLO_DIR.mkdir(parents=True, exist_ok=True)
+    path = _YOLO_DIR / filename
     if not path.exists():
-        print(f"Downloading {filename} to {_YOLO_MODEL_DIR} …")
-        # Load with just the name so Ultralytics uses its own download logic,
-        # then save the resulting model file to our preferred location.
+        print(f"Downloading {filename} → {_YOLO_DIR} …")
         tmp = YOLO(filename)
-        src = Path(tmp.ckpt_path)
-        shutil.copy2(src, path)
-        print(f"Saved {filename} → {path}")
+        shutil.copy2(Path(tmp.ckpt_path), path)
+        print(f"Saved {path}")
     return YOLO(str(path))
 
 
-# ---------------------------------------------------------------------------
-# YOLO-based classification
-# ---------------------------------------------------------------------------
+def _run_yolo(image_path: str) -> Dict[str, Any]:
+    """Run YOLO detection and return honest findings.
 
-def _classify_with_yolo(image_path: str) -> Dict[str, Any]:
-    """Run YOLO detection + pose on one image and return a raw findings dict.
-
-    Returns:
-        {
-          "person_count": int,
-          "head_count": int,        # nose keypoints above threshold
-          "extra_heads": bool,
-          "missing_person": bool,   # expected person but none found
-          "low_confidence_pose": bool,
-          "detections": list[str],  # human-readable detected class names
-        }
+    Returns person_count and a list of all detected class names.
+    Does NOT make structure claims beyond object presence/count.
     """
-    detect_model = _get_yolo_detect()
-    pose_model   = _get_yolo_pose()
+    model       = _get_yolo_detect()
+    results     = model(image_path, verbose=False)[0]
+    class_names = results.names
+    boxes       = results.boxes
 
-    # ── detection pass ───────────────────────────────────────────────────────
-    det_results  = detect_model(image_path, verbose=False)[0]
-    class_names  = det_results.names
-    boxes        = det_results.boxes
-
-    detected_classes: list[str] = []
+    detected: list[str] = []
     person_count = 0
+
     if boxes is not None and len(boxes):
         for cls_id, conf in zip(boxes.cls.tolist(), boxes.conf.tolist()):
             if conf < 0.35:
                 continue
-            name = class_names.get(int(cls_id), str(cls_id))
-            detected_classes.append(name)
+            name = class_names.get(int(cls_id), str(int(cls_id)))
+            detected.append(name)
             if name == "person":
                 person_count += 1
 
-    # ── pose pass (only meaningful when people are present) ──────────────────
-    head_count          = 0
-    low_confidence_pose = False
+    return {"person_count": person_count, "detections": detected}
 
-    if person_count > 0:
-        pose_results = pose_model(image_path, verbose=False)[0]
-        kps = pose_results.keypoints  # shape (N_persons, 17, 3) — x,y,conf
 
-        if kps is not None and kps.data is not None:
-            kp_data = kps.data.cpu().numpy()   # (N, 17, 3)
-            for person_kps in kp_data:
-                # Keypoint 0 = nose (head proxy)
-                nose_conf = float(person_kps[0, 2])
-                if nose_conf >= _POSE_CONF_THRESHOLD:
-                    head_count += 1
-                # Check overall pose confidence
-                visible = (person_kps[:, 2] >= _POSE_CONF_THRESHOLD).sum()
-                if visible < 5:
-                    low_confidence_pose = True
+# ---------------------------------------------------------------------------
+# Moondream2 deep scan
+# ---------------------------------------------------------------------------
 
-    extra_heads    = person_count > 0 and head_count > person_count
-    missing_person = person_count > 0 and head_count == 0
+def _get_moondream():
+    """Return (model, tokenizer), downloading on first call (~2 GB)."""
+    global _moondream_cache
+    if _moondream_cache is None:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        print(f"Loading moondream2 from HuggingFace ({_MOONDREAM_REPO}) …")
+        tokenizer = AutoTokenizer.from_pretrained(
+            _MOONDREAM_REPO, revision=_MOONDREAM_REVISION, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            _MOONDREAM_REPO, revision=_MOONDREAM_REVISION,
+            trust_remote_code=True, torch_dtype=torch.float32)
+        device = (torch.device("cuda") if torch.cuda.is_available()
+                  else torch.device("mps") if torch.backends.mps.is_available()
+                  else torch.device("cpu"))
+        model = model.to(device).eval()
+        print(f"moondream2 loaded on {device}")
+        _moondream_cache = (model, tokenizer)
+    return _moondream_cache
+
+
+def _run_moondream(image_path: str) -> Dict[str, Any]:
+    """Ask moondream2 whether the image has structure defects.
+
+    Returns:
+        {
+          "structure_ok": bool,   # True = no defects found
+          "structure_note": str,  # model's description
+          "raw": str,           # full model response
+        }
+    """
+    if Image is None:
+        raise RuntimeError("Pillow required for moondream2 inference")
+
+    model, tokenizer = _get_moondream()
+    img = Image.open(image_path).convert("RGB")
+
+    # moondream2 API: encode image then answer a question
+    enc   = model.encode_image(img)
+    answer: str = model.answer_question(enc, _STRUCTURE_PROMPT, tokenizer)
+
+    first_word  = answer.strip().split()[0].upper().rstrip(".,:")
+    structure_ok  = first_word == "NO"
+    structure_note = answer.strip()
 
     return {
-        "person_count":        person_count,
-        "head_count":          head_count,
-        "extra_heads":         extra_heads,
-        "missing_person":      missing_person,
-        "low_confidence_pose": low_confidence_pose,
-        "detections":          detected_classes,
+        "structure_ok":   structure_ok,
+        "structure_note": structure_note,
+        "raw":          answer,
     }
 
 
 # ---------------------------------------------------------------------------
-# Pixel-level heuristics (exposure, contrast — no model needed)
+# Pixel heuristics
 # ---------------------------------------------------------------------------
 
 def _pixel_stats(image_path: str) -> Dict[str, float]:
-    """Return brightness and contrast from the greyscale histogram."""
     if Image is None:
         return {"brightness": 0.5, "contrast": 0.2}
     img  = Image.open(image_path).convert("L")
@@ -199,6 +207,55 @@ def _pixel_stats(image_path: str) -> Dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# QC settings dataclass
+# ---------------------------------------------------------------------------
+
+class QCSettings:
+    """Tunable parameters for the local QC pipeline.
+
+    All thresholds can be adjusted via the GUI settings panel or CLI flags.
+    """
+
+    def __init__(
+        self,
+        # Exposure thresholds
+        brightness_dark_fail: float = 0.08,
+        brightness_dark_warn: float = 0.20,
+        brightness_bright_fail: float = 0.92,
+        brightness_bright_warn: float = 0.85,
+        contrast_low_fail: float = 0.08,
+        contrast_high_warn: float = 0.48,
+        # Score thresholds for pass/warning/fail
+        score_pass: float = 80.0,
+        score_warn: float = 50.0,
+        # Feature toggles
+        use_yolo: bool = True,
+        use_deep_scan: bool = False,   # moondream2
+        deep_scan_persons_only: bool = True,  # only scan images with people
+        # Deep-scan strictness
+        # "strict"  → any structure note = fail
+        # "balanced"→ any structure note = warning, strong language = fail
+        # "relaxed" → only fail on very explicit problems
+        deep_scan_strictness: str = "balanced",
+    ):
+        self.brightness_dark_fail    = brightness_dark_fail
+        self.brightness_dark_warn    = brightness_dark_warn
+        self.brightness_bright_fail  = brightness_bright_fail
+        self.brightness_bright_warn  = brightness_bright_warn
+        self.contrast_low_fail       = contrast_low_fail
+        self.contrast_high_warn      = contrast_high_warn
+        self.score_pass              = score_pass
+        self.score_warn              = score_warn
+        self.use_yolo                = use_yolo
+        self.use_deep_scan           = use_deep_scan
+        self.deep_scan_persons_only  = deep_scan_persons_only
+        self.deep_scan_strictness    = deep_scan_strictness
+
+
+_DEFAULT_SETTINGS = QCSettings()
+
+
+# ---------------------------------------------------------------------------
 # Main local classifier
 # ---------------------------------------------------------------------------
 
@@ -206,88 +263,109 @@ def classify_image(
     image_path: str,
     output_dir: str,
     move_files: bool = False,
-    use_yolo: bool = True,
+    settings: QCSettings | None = None,
 ) -> Dict[str, Any]:
-    """Classify one image using local models and pixel heuristics.
+    """Classify one image and route it to pass/warning/fail.
 
-    Args:
-        image_path: Path to the source image.
-        output_dir: Root output directory; pass/warning/fail subdirs are
-            created automatically.
-        move_files: Move the original instead of copying it.
-        use_yolo: Set False to skip YOLO (pixel heuristics only).  Useful
-            when Ultralytics is not installed or for very fast previews.
+    Steps
+    -----
+    1. Pixel heuristics: exposure and contrast checks (always).
+    2. YOLO detection: person count, object classes (if ``settings.use_yolo``).
+    3. Moondream2 structure scan: holistic visual reasoning about defects
+       (if ``settings.use_deep_scan``).  Only fires on person-containing images
+       unless ``deep_scan_persons_only`` is False.
 
-    Returns:
-        Result dict with keys: filename, status, score, issues, brightness,
-        contrast, person_count, head_count, detections, destination.
+    Returns a result dict with: filename, status, score, issues, brightness,
+    contrast, person_count, detections, structure_note, destination.
     """
-    issues: list[str] = []
-    score = 100.0
-    yolo_findings: Dict[str, Any] = {}
+    if settings is None:
+        settings = _DEFAULT_SETTINGS
 
-    # ── pixel checks (always run) ─────────────────────────────────────────────
-    stats = _pixel_stats(image_path)
+    issues: list[str] = []
+    score  = 100.0
+    person_count = 0
+    detections: list[str] = []
+    structure_note = ""
+
+    # ── 1. Pixel checks ───────────────────────────────────────────────────────
+    stats      = _pixel_stats(image_path)
     brightness = stats["brightness"]
     contrast   = stats["contrast"]
 
-    if brightness < 0.08:
-        issues.append("very dark")
+    if brightness < settings.brightness_dark_fail:
+        issues.append("very dark / underexposed")
         score -= 25
-    elif brightness < 0.20:
+    elif brightness < settings.brightness_dark_warn:
         issues.append("dark exposure")
         score -= 10
 
-    if brightness > 0.92:
+    if brightness > settings.brightness_bright_fail:
         issues.append("very bright / overexposed")
         score -= 25
-    elif brightness > 0.85:
+    elif brightness > settings.brightness_bright_warn:
         issues.append("bright exposure")
         score -= 10
 
-    if contrast < 0.08:
+    if contrast < settings.contrast_low_fail:
         issues.append("low contrast")
         score -= 12
-    elif contrast > 0.48:
+    elif contrast > settings.contrast_high_warn:
         issues.append("high contrast / harsh")
         score -= 8
 
-    # ── YOLO checks ───────────────────────────────────────────────────────────
-    try:
-        if use_yolo:
-            yolo_findings = _classify_with_yolo(image_path)
+    # ── 2. YOLO detection ─────────────────────────────────────────────────────
+    if settings.use_yolo:
+        try:
+            yolo = _run_yolo(image_path)
+            person_count = yolo["person_count"]
+            detections   = yolo["detections"]
+        except Exception as exc:
+            issues.append(f"YOLO skipped ({exc})")
 
-            if yolo_findings["extra_heads"]:
-                issues.append(
-                    f"duplicate head detected "
-                    f"({yolo_findings['head_count']} heads, "
-                    f"{yolo_findings['person_count']} person(s))"
-                )
-                score -= 40
+    # ── 3. Moondream2 deep scan ───────────────────────────────────────────────
+    run_deep = (
+        settings.use_deep_scan
+        and (not settings.deep_scan_persons_only or person_count > 0)
+    )
+    if run_deep:
+        try:
+            scan = _run_moondream(image_path)
+            structure_note = scan["structure_note"]
 
-            if yolo_findings["missing_person"]:
-                issues.append("person detected but no head visible")
-                score -= 20
+            if not scan["structure_ok"]:
+                note_lower = structure_note.lower()
+                # Escalate to fail for explicit severe problems.
+                severe = any(kw in note_lower for kw in (
+                    "two head", "duplicate head", "extra head",
+                    "fused", "merged bod", "extra limb", "three arm",
+                    "three leg", "malformed",
+                ))
+                if settings.deep_scan_strictness == "strict" or severe:
+                    issues.append(f"structure defect: {structure_note}")
+                    score -= 45
+                elif settings.deep_scan_strictness == "balanced":
+                    issues.append(f"possible structure issue: {structure_note}")
+                    score -= 20
+                else:  # relaxed
+                    if severe:
+                        issues.append(f"structure defect: {structure_note}")
+                        score -= 45
+                    # otherwise ignore
+        except Exception as exc:
+            issues.append(f"deep scan skipped ({exc})")
 
-            if yolo_findings["low_confidence_pose"]:
-                issues.append("low-confidence pose — possible structure artifact")
-                score -= 15
-
-    except Exception as exc:
-        issues.append(f"YOLO check skipped ({exc})")
-
-    # ── final verdict ─────────────────────────────────────────────────────────
+    # ── Final verdict ─────────────────────────────────────────────────────────
     score = max(0.0, min(100.0, score))
 
-    if score >= 80:
+    if score >= settings.score_pass:
         status = "pass"
-    elif score >= 50:
+    elif score >= settings.score_warn:
         status = "warning"
     else:
         status = "fail"
 
-    # Structure failures always floor to fail regardless of score.
-    if yolo_findings.get("extra_heads"):
+    # Hard fail on confirmed severe structure regardless of score.
+    if any("structure defect" in i for i in issues):
         status = "fail"
 
     os.makedirs(output_dir, exist_ok=True)
@@ -302,9 +380,9 @@ def classify_image(
         "issues":       issues,
         "brightness":   round(brightness, 3),
         "contrast":     round(contrast, 3),
-        "person_count": yolo_findings.get("person_count", 0),
-        "head_count":   yolo_findings.get("head_count", 0),
-        "detections":   yolo_findings.get("detections", []),
+        "person_count": person_count,
+        "detections":   detections,
+        "structure_note": structure_note,
         "destination":  destination,
     }
 
@@ -313,37 +391,31 @@ def classify_image(
 # Optional: OpenAI-compatible vision backend
 # ---------------------------------------------------------------------------
 
-def _serve_image_file_url(
-    image_path: str, max_side: int = 256, quality: int = 25
-) -> tuple[ThreadingHTTPServer, str, str]:
+def _serve_image_url(image_path: str, max_side: int = 512) -> tuple:
     if Image is None:
-        raise RuntimeError("Pillow is required to encode images for backend QC")
-    temp_dir    = tempfile.mkdtemp(prefix="qc_img_")
-    output_name = quote(os.path.basename(image_path))
-    output_path = os.path.join(temp_dir, output_name)
+        raise RuntimeError("Pillow required")
+    tmp = tempfile.mkdtemp(prefix="qc_")
+    name = quote(os.path.basename(image_path))
+    out  = os.path.join(tmp, name)
     with Image.open(image_path) as img:
         img = img.convert("RGB")
         img.thumbnail((max_side, max_side), Image.LANCZOS)
-        img.save(output_path, format="JPEG", quality=quality, optimize=True)
-    handler = partial(SimpleHTTPRequestHandler, directory=temp_dir)
+        img.save(out, format="JPEG", quality=85)
+    handler = partial(SimpleHTTPRequestHandler, directory=tmp)
     server  = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/{output_name}"
-    return server, url, temp_dir
+    return server, f"http://127.0.0.1:{server.server_address[1]}/{name}", tmp
 
 
-def _shutdown_image_server(server: ThreadingHTTPServer, temp_dir: str) -> None:
+def _stop_server(server, tmp: str) -> None:
     try:
         server.shutdown()
     finally:
         server.server_close()
-    try:
-        shutil.rmtree(temp_dir)
-    except Exception:
-        pass
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _http_post_json(url: str, payload: Dict[str, Any], timeout: float = 120.0) -> Dict[str, Any]:
+def _http_post(url: str, payload: dict, timeout: float = 120.0) -> dict:
     if requests is not None:
         r = requests.post(url, json=payload, timeout=timeout)
         r.raise_for_status()
@@ -351,38 +423,38 @@ def _http_post_json(url: str, payload: Dict[str, Any], timeout: float = 120.0) -
     import urllib.request, urllib.error
     data = json.dumps(payload).encode()
     req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Backend {exc.code} {exc.reason}: {body}") from exc
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Backend {e.code}: {e.read().decode()}") from e
 
 
-def _parse_backend_text(text: str) -> Dict[str, Any]:
-    """Best-effort JSON extraction + text fallback from an LLM response."""
-    trimmed = text.strip()
-    # Try to find a JSON object anywhere in the response.
-    for start, end in [(trimmed.find("{"), trimmed.rfind("}"))]:
-        if start >= 0 and end > start:
-            try:
-                return json.loads(trimmed[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-    # Fall back to keyword extraction.
-    lower  = trimmed.lower()
-    status = ("fail"    if re.search(r"\b(fail|reject|bad|terrible)\b", lower) and
-                          not re.search(r"\bnot\s+fail\b", lower)
-              else "warning" if re.search(r"\b(warning|minor|some issues)\b", lower)
-              else "pass"    if re.search(r"\b(pass|good|acceptable|fine)\b", lower)
-              else "warning")
-    issues: list[str] = []
-    for kw, label in [("duplicate", "duplicate structure"), ("extra head", "extra head"),
-                      ("blur", "blurry"), ("dark", "dark"), ("bright", "bright"),
-                      ("artifact", "artifact"), ("noise", "noise")]:
-        if kw in lower:
-            issues.append(label)
+def _parse_llm_response(text: str) -> Dict[str, Any]:
+    """Extract status/score/issues from free-form LLM text."""
+    t = text.strip()
+    # Try embedded JSON first.
+    s, e = t.find("{"), t.rfind("}")
+    if s >= 0 and e > s:
+        try:
+            return json.loads(t[s:e+1])
+        except json.JSONDecodeError:
+            pass
+    lower = t.lower()
+    status = (
+        "fail"    if re.search(r"\b(fail|reject|unacceptable)\b", lower)
+                     and not re.search(r"\bnot\s+fail\b", lower)
+        else "warning" if re.search(r"\b(warning|minor|some issues)\b", lower)
+        else "pass"    if re.search(r"\b(pass|good|acceptable|fine|ok)\b", lower)
+        else "warning"
+    )
+    issues = [label for kw, label in [
+        ("duplicate", "duplicate structure"), ("extra head", "extra head"),
+        ("fused", "fused figures"), ("blur", "blurry"),
+        ("dark", "dark"), ("bright", "bright"),
+        ("artifact", "artifact"), ("noise", "noise"),
+    ] if kw in lower]
     return {"status": status, "score": None, "issues": issues}
 
 
@@ -394,46 +466,39 @@ def classify_image_with_backend(
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
 ) -> Dict[str, Any]:
-    """Classify one image using an OpenAI-compatible vision backend.
-
-    The image is served over a local HTTP server so the backend can fetch it
-    by URL (works with LM Studio, Ollama, and similar local servers).
-    """
-    server, image_url, temp_dir = _serve_image_file_url(image_path)
+    """Classify one image via an OpenAI-compatible vision backend."""
+    server, img_url, tmp = _serve_image_url(image_path)
     try:
         prompt = (
-            "You are an image quality-control assistant. Inspect the image carefully. "
-            "Explicitly look for: duplicated or missing heads, faces, torsos, arms, legs, "
-            "hands, fingers, fused body parts, exposure problems, blur, and noise. "
-            "Reply with a brief assessment followed by a JSON object containing: "
-            "status (pass/warning/fail), score (0-100), issues (list of strings)."
+            "Inspect this image carefully for quality issues. "
+            "Look for: duplicated/fused figures, extra or missing limbs, "
+            "malformed hands, exposure problems, blur, and noise. "
+            "Reply with a JSON object: {status, score, issues}. "
+            "status: pass/warning/fail. score: 0-100. issues: list of strings."
         )
-        payload = {
-            "model": model_name,
-            "temperature": 0.2,
+        raw = _http_post(backend_url, {
+            "model": model_name, "temperature": 0.1,
+            "image_url": img_url,
             "messages": [
-                {"role": "system",
-                 "content": "You are an image QC assistant. Read the image from image_url."},
-                {"role": "user",
-                 "content": prompt},
+                {"role": "system", "content": "You are an image QC assistant."},
+                {"role": "user",   "content": prompt},
             ],
-            "image_url": image_url,
-        }
-        raw = _http_post_json(backend_url, payload, timeout=timeout)
+        }, timeout=timeout)
     finally:
-        _shutdown_image_server(server, temp_dir)
+        _stop_server(server, tmp)
 
     choices = raw.get("choices") or []
-    text    = ""
+    text = ""
     if choices:
         msg  = choices[0].get("message") or {}
         text = msg.get("content") or choices[0].get("text") or ""
     if not text:
         raise ValueError("Backend returned no content")
 
-    parsed = _parse_backend_text(text)
+    parsed = _parse_llm_response(text)
     status = parsed.get("status", "warning")
-    score  = float(parsed.get("score") or (100 if status == "pass" else 65 if status == "warning" else 30))
+    score  = float(parsed.get("score") or
+                   (100 if status == "pass" else 65 if status == "warning" else 30))
     issues = parsed.get("issues") or []
 
     os.makedirs(output_dir, exist_ok=True)
@@ -442,11 +507,12 @@ def classify_image_with_backend(
     destination = _route_image(image_path, output_dir, status, move_files)
 
     return {
-        "filename":    os.path.basename(image_path),
-        "status":      status,
-        "score":       round(score, 1),
-        "issues":      issues,
-        "destination": destination,
+        "filename":     os.path.basename(image_path),
+        "status":       status,
+        "score":        round(score, 1),
+        "issues":       issues,
+        "structure_note": text[:200],
+        "destination":  destination,
     }
 
 
@@ -455,25 +521,22 @@ def classify_image_with_backend(
 # ---------------------------------------------------------------------------
 
 def collect_images(input_path: str) -> List[str]:
-    """Return sorted list of image paths from a file or directory."""
     input_path = os.path.expanduser(input_path)
     if os.path.isfile(input_path):
         return [input_path]
     if os.path.isdir(input_path):
-        names = [p for p in os.listdir(input_path)
-                 if os.path.splitext(p)[1].lower() in IMAGE_EXTENSIONS]
-        return sorted(os.path.join(input_path, n) for n in names)
-    raise FileNotFoundError(f"Input not found: {input_path}")
+        return sorted(
+            os.path.join(input_path, n) for n in os.listdir(input_path)
+            if os.path.splitext(n)[1].lower() in IMAGE_EXTENSIONS
+        )
+    raise FileNotFoundError(f"Not found: {input_path}")
 
 
-def _route_image(image_path: str, output_dir: str, status: str, move_files: bool) -> str:
-    dest_dir = os.path.join(output_dir, status)
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, os.path.basename(image_path))
-    if move_files:
-        shutil.move(image_path, dest)
-    else:
-        shutil.copy2(image_path, dest)
+def _route_image(image_path: str, output_dir: str,
+                 status: str, move_files: bool) -> str:
+    dest = os.path.join(output_dir, status, os.path.basename(image_path))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    (shutil.move if move_files else shutil.copy2)(image_path, dest)
     return dest
 
 
@@ -487,17 +550,11 @@ def run_qc(
     backend_url: Optional[str] = None,
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
-    use_yolo: bool = True,
+    settings: QCSettings | None = None,
 ) -> List[Dict[str, Any]]:
-    """Run QC on all images in ``input_path``.
-
-    Uses local YOLO inference by default.  Pass ``backend_url`` to route
-    through an OpenAI-compatible vision server instead.
-
-    Returns:
-        List of per-image result dicts, also written to
-        ``<output_dir>/report.json``.
-    """
+    """Run QC on all images in ``input_path``, write report.json."""
+    if settings is None:
+        settings = _DEFAULT_SETTINGS
     images = collect_images(input_path)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
@@ -507,23 +564,22 @@ def run_qc(
         if backend_url:
             r = classify_image_with_backend(
                 image_path, backend_url, output_dir,
-                model_name=model_name, move_files=move_files,
-            )
+                model_name=model_name, move_files=move_files)
         else:
             r = classify_image(image_path, output_dir,
-                               move_files=move_files, use_yolo=use_yolo)
+                               move_files=move_files, settings=settings)
         results.append(r)
 
-    report_path = os.path.join(output_dir, "report.json")
     os.makedirs(output_dir, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as fh:
+    report = os.path.join(output_dir, "report.json")
+    with open(report, "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
 
     counts = {s: sum(1 for r in results if r["status"] == s)
               for s in ("pass", "warning", "fail")}
-    print(f"QC complete — {len(results)} images | "
-          f"pass {counts['pass']}  warning {counts['warning']}  fail {counts['fail']}")
-    print(f"Report: {report_path}")
+    print(f"QC done — {len(results)} images | "
+          f"pass {counts['pass']}  warning {counts['warning']}  "
+          f"fail {counts['fail']}")
     return results
 
 
@@ -532,30 +588,35 @@ def run_qc(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="StereoSift image QC — local YOLO or vision backend",
+    p = argparse.ArgumentParser(
+        description="StereoSift image QC",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input",       required=True, help="Image file or folder")
-    parser.add_argument("--output-dir",  default="output/qc")
-    parser.add_argument("--backend-url", default=None,
-                        help="OpenAI-compatible vision endpoint (optional)")
-    parser.add_argument("--model",       default="llama-3.2-11b-vision-instruct",
-                        help="Model name for backend QC")
-    parser.add_argument("--no-yolo",     action="store_true",
-                        help="Skip YOLO — pixel heuristics only")
-    parser.add_argument("--move",        action="store_true",
-                        help="Move originals instead of copying")
-    args = parser.parse_args()
+    p.add_argument("--input",        required=True)
+    p.add_argument("--output-dir",   default="output/qc")
+    p.add_argument("--backend-url",  default=None)
+    p.add_argument("--model",        default="llama-3.2-11b-vision-instruct")
+    p.add_argument("--deep-scan",    action="store_true",
+                   help="Enable moondream2 structure scan")
+    p.add_argument("--scan-all",     action="store_true",
+                   help="Deep-scan non-person images too")
+    p.add_argument("--strictness",   default="balanced",
+                   choices=["relaxed", "balanced", "strict"])
+    p.add_argument("--no-yolo",      action="store_true")
+    p.add_argument("--move",         action="store_true")
+    args = p.parse_args()
 
-    run_qc(
-        args.input,
-        args.output_dir,
-        backend_url=args.backend_url,
-        model_name=args.model,
-        move_files=args.move,
+    settings = QCSettings(
         use_yolo=not args.no_yolo,
+        use_deep_scan=args.deep_scan,
+        deep_scan_persons_only=not args.scan_all,
+        deep_scan_strictness=args.strictness,
     )
+    run_qc(args.input, args.output_dir,
+           backend_url=args.backend_url,
+           model_name=args.model,
+           move_files=args.move,
+           settings=settings)
 
 
 if __name__ == "__main__":

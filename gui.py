@@ -384,14 +384,8 @@ class ConvertTab(ctk.CTkFrame):
 # ── Judge tab ─────────────────────────────────────────────────────────────────
 
 class JudgeTab(ctk.CTkFrame):
-    """QC image sorting using local YOLO inference (primary) or a vision backend.
-
-    Primary path: YOLO11 detect + pose, no server required.
-      - yolo11n.pt      detects objects / exposure cues
-      - yolo11n-pose.pt counts heads and keypoints per person
-    Models are ~6 MB each and download automatically on first run.
-
-    Optional: fill in the vision backend URL for richer LLM-based assessment.
+    """QC sorting: pixel checks + YOLO person detection + optional moondream2
+    structure deep scan.  All local, all PyTorch, no server required.
     """
 
     def __init__(self, master, **kw):
@@ -400,7 +394,7 @@ class JudgeTab(ctk.CTkFrame):
         self._q: queue.Queue = queue.Queue()
         self._running = False
         self._results: list[dict] = []
-        self._result_row = 1  # next empty row in results table (0 = header)
+        self._result_row = 1
         self._build()
         self._poll()
 
@@ -432,13 +426,12 @@ class JudgeTab(ctk.CTkFrame):
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
-        opts.grid_columnconfigure(0, weight=0)
         opts.grid_columnconfigure(1, weight=1)
 
-        # YOLO info label
+        # Info label
         ctk.CTkLabel(
             opts,
-            text="Local YOLO models (yolo11n.pt + yolo11n-pose.pt) download on first run (~12 MB).",
+            text="YOLO detects persons/objects (~6 MB). moondream2 deep scan catches structure defects (~2 GB).",
             text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
 
@@ -446,24 +439,41 @@ class JudgeTab(ctk.CTkFrame):
         self._move_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             opts,
-            text="Move originals  (destructive — default is safe copy)",
+            text="Move originals (destructive — default copies)",
             variable=self._move_var,
             text_color="#e74c3c",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 8))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
 
-        # ── optional backend (collapsible-ish) ────────────────────────────────
+        # Deep scan toggle
+        self._deep_scan_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            opts,
+            text="Deep scan (moondream2) — checks structure on person images",
+            variable=self._deep_scan_var,
+            text_color="#7eb3ff",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+
+        # Strictness
+        ctk.CTkLabel(opts, text="Strictness", anchor="w").grid(
+            row=3, column=0, sticky="w", padx=(8, 6), pady=4)
+        self._strictness_var = ctk.StringVar(value="balanced")
+        ctk.CTkOptionMenu(
+            opts, variable=self._strictness_var,
+            values=["relaxed", "balanced", "strict"],
+        ).grid(row=3, column=1, sticky="w", padx=(0, 8), pady=4)
+
+        # ── optional backend ──────────────────────────────────────────────────
         adv_toggle = ctk.CTkButton(
-            opts, text="▶  Vision backend (optional)",
+            opts, text="▶  Remote backend (replaces moondream2)",
             fg_color="transparent", hover_color="#333",
-            anchor="w", font=ctk.CTkFont(size=12),
+            anchor="w", font=ctk.CTkFont(size=11),
             command=self._toggle_advanced,
         )
-        adv_toggle.grid(row=2, column=0, columnspan=2,
-                        sticky="w", padx=6, pady=(0, 2))
+        adv_toggle.grid(row=4, column=0, columnspan=2,
+                        sticky="w", padx=6, pady=(4, 2))
         self._adv_toggle_btn = adv_toggle
 
         self._adv_frame = ctk.CTkFrame(opts, fg_color="transparent")
-        # not gridded initially — shown on toggle
 
         ctk.CTkLabel(self._adv_frame, text="Backend URL", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=4)
@@ -509,8 +519,8 @@ class JudgeTab(ctk.CTkFrame):
         scrollbar.grid(row=1, column=1, sticky="ns")
 
         for col, (text, w) in enumerate([
-            ("File", 220), ("Status", 80), ("Score", 55),
-            ("Persons", 65), ("Heads", 55), ("Issues", 240),
+            ("File", 200), ("Status", 80), ("Score", 55),
+            ("Persons", 65), ("Issues", 200), ("Structure note", 200),
         ]):
             ctk.CTkLabel(self._results_frame, text=text,
                          font=ctk.CTkFont(weight="bold"),
@@ -551,18 +561,20 @@ class JudgeTab(ctk.CTkFrame):
     def _add_result_row(self, result: dict, row_idx: int):
         status = result.get("status", "warning")
         color  = STATUS_COLORS.get(status, "#888")
-
+        note   = result.get("structure_note") or "—"
+        if len(note) > 80:
+            note = note[:77] + "…"
         values = [
-            (os.path.basename(result.get("filename", "")), 220, "w"),
+            (os.path.basename(result.get("filename", "")), 200, "w"),
             (status.upper(),                                80, "center"),
             (str(result.get("score", "—")),                55, "center"),
             (str(result.get("person_count", "—")),         65, "center"),
-            (str(result.get("head_count",   "—")),         55, "center"),
-            (", ".join(result.get("issues") or []) or "—", 240, "w"),
+            (", ".join(result.get("issues") or []) or "—", 200, "w"),
+            (note,                                         200, "w"),
         ]
         for col, (text, w, anchor) in enumerate(values):
             kw: dict = dict(width=w, anchor=anchor, wraplength=w - 6)
-            if col == 1:   # status badge
+            if col == 1:
                 kw.update(fg_color=color, corner_radius=6, text_color="white")
             ctk.CTkLabel(self._results_frame, text=text, **kw).grid(
                 row=row_idx, column=col, padx=3, pady=1, sticky="w")
@@ -604,6 +616,8 @@ class JudgeTab(ctk.CTkFrame):
             backend_url=self._backend_var.get().strip() or None,
             model_name=self._backend_model_var.get().strip(),
             move_files=self._move_var.get(),
+            deep_scan=self._deep_scan_var.get(),
+            strictness=self._strictness_var.get(),
         )
         threading.Thread(target=self._worker, args=(opts,), daemon=True).start()
 
@@ -611,7 +625,7 @@ class JudgeTab(ctk.CTkFrame):
         q = self._q
         try:
             from qc_pipeline import collect_images, classify_image, \
-                classify_image_with_backend
+                classify_image_with_backend, QCSettings
 
             images = collect_images(opts["input_path"])
             if not images:
@@ -620,9 +634,17 @@ class JudgeTab(ctk.CTkFrame):
                 return
 
             use_backend = bool(opts["backend_url"])
-            if not use_backend:
-                q.put(("log",
-                       "Using local YOLO — models download on first run."))
+            if use_backend:
+                q.put(("log", "Using remote backend"))
+            else:
+                label = "moondream2 deep scan enabled" if opts["deep_scan"] else "basic checks + YOLO"
+                q.put(("log", f"Local inference — {label}"))
+
+            settings = QCSettings(
+                use_yolo=True,
+                use_deep_scan=opts["deep_scan"],
+                deep_scan_strictness=opts["strictness"],
+            )
 
             q.put(("log", f"Found {len(images)} image(s)"))
             results = []
@@ -640,7 +662,7 @@ class JudgeTab(ctk.CTkFrame):
                     r = classify_image(
                         path, opts["output_dir"],
                         move_files=opts["move_files"],
-                        use_yolo=True,
+                        settings=settings,
                     )
                 results.append(r)
                 q.put(("result", r))
