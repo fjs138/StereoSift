@@ -59,9 +59,9 @@ class TestQCModelDecisions(unittest.TestCase):
     @patch("qc_pipeline._get_moondream")
     def test_moondream_no_prefix_means_structure_is_ok(self, mock_get_moondream):
         model = Mock()
-        model.encode_image.return_value = object()
-        model.answer_question.return_value = "NO. The visible structure appears coherent."
-        mock_get_moondream.return_value = (model, object())
+        # query() now returns a dict with an "answer" key
+        model.query.return_value = {"answer": "NO. The visible structure appears coherent."}
+        mock_get_moondream.return_value = model
 
         result = _run_moondream(self.image_path)
 

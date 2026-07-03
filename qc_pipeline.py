@@ -82,7 +82,7 @@ _STRUCTURE_PROMPT = (
 # ---------------------------------------------------------------------------
 
 _yolo_detect_cache: Any   = None
-_moondream_cache:   tuple | None = None   # (model, tokenizer)
+_moondream_cache: Any = None   # model singleton
 
 
 # ---------------------------------------------------------------------------
@@ -140,14 +140,12 @@ def _run_yolo(image_path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _get_moondream():
-    """Return (model, tokenizer), downloading on first call (~2 GB)."""
+    """Return the moondream2 model, downloading on first call (~2 GB)."""
     global _moondream_cache
     if _moondream_cache is None:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        print(f"Loading moondream2 from HuggingFace ({_MOONDREAM_REPO}) …")
-        tokenizer = AutoTokenizer.from_pretrained(
-            _MOONDREAM_REPO, revision=_MOONDREAM_REVISION, trust_remote_code=True)
+        from transformers import AutoModelForCausalLM
+        print(f"Loading moondream2 ({_MOONDREAM_REPO} @ {_MOONDREAM_REVISION}) …")
         model = AutoModelForCausalLM.from_pretrained(
             _MOONDREAM_REPO, revision=_MOONDREAM_REVISION,
             trust_remote_code=True, torch_dtype=torch.float32)
@@ -155,8 +153,8 @@ def _get_moondream():
                   else torch.device("mps") if torch.backends.mps.is_available()
                   else torch.device("cpu"))
         model = model.to(device).eval()
-        print(f"moondream2 loaded on {device}")
-        _moondream_cache = (model, tokenizer)
+        print(f"moondream2 ready on {device}")
+        _moondream_cache = model
     return _moondream_cache
 
 
@@ -173,20 +171,19 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     if Image is None:
         raise RuntimeError("Pillow required for moondream2 inference")
 
-    model, tokenizer = _get_moondream()
+    model = _get_moondream()
     img = Image.open(image_path).convert("RGB")
 
-    # moondream2 API: encode image then answer a question
-    enc   = model.encode_image(img)
-    answer: str = model.answer_question(enc, _STRUCTURE_PROMPT, tokenizer)
+    # Use the query() API directly — cleaner than encode_image + answer_question.
+    result = model.query(img, _STRUCTURE_PROMPT)
+    answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
 
-    first_word  = answer.strip().split()[0].upper().rstrip(".,:")
-    structure_ok  = first_word == "NO"
-    structure_note = answer.strip()
+    first_word = answer.split()[0].upper().rstrip(".,:")
+    structure_ok = first_word == "NO"
 
     return {
         "structure_ok":   structure_ok,
-        "structure_note": structure_note,
+        "structure_note": answer,
         "raw":          answer,
     }
 
