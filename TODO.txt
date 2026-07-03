@@ -1,5 +1,1 @@
-StereoSift roadmap
-
-- Expose image anaglyph output and convergence in the GUI (CLI support is complete).
-- Calibrate visual-judgment thresholds against a labeled artifact test set.
-- Consider video anaglyph output after the image workflow is validated.
+Nothing pending.

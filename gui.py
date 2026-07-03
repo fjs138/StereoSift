@@ -172,8 +172,8 @@ class ConvertTab(ctk.CTkFrame):
             opts.grid_columnconfigure(c, weight=1)
 
         # Row 0 — labels
-        for col, text in enumerate(["Mode", "Model size", "Method",
-                                     "Viewing mode", ""]):
+        for col, text in enumerate(["Mode", "Model size", "Output format",
+                                     "Method", "Viewing mode"]):
             ctk.CTkLabel(opts, text=text).grid(
                 row=0, column=col, padx=8, pady=(8, 2))
 
@@ -196,23 +196,32 @@ class ConvertTab(ctk.CTkFrame):
         self._model_lbl.grid(row=2, column=0, columnspan=2,
                               padx=8, sticky="w", pady=(0, 4))
 
+        # Output format — SBS, anaglyph, or both
+        self._output_format_var = ctk.StringVar(value="sbs")
+        self._fmt_menu = ctk.CTkOptionMenu(
+            opts, variable=self._output_format_var,
+            values=["sbs", "anaglyph", "both"],
+            command=self._on_format_change)
+        self._fmt_menu.grid(row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
+
         # Method
         self._method_var = ctk.StringVar(value="mesh_warping")
         ctk.CTkOptionMenu(opts, variable=self._method_var,
                           values=["mesh_warping", "grid_sampling"]).grid(
-            row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
-
-        # Viewing mode
-        self._sbs_mode_var = ctk.StringVar(value="parallel")
-        ctk.CTkOptionMenu(opts, variable=self._sbs_mode_var,
-                          values=["parallel", "cross-eyed"]).grid(
             row=1, column=3, padx=8, pady=(0, 8), sticky="ew")
 
-        # Depth-only checkbox
+        # Viewing mode (hidden when anaglyph-only)
+        self._sbs_mode_var = ctk.StringVar(value="parallel")
+        self._sbs_mode_menu = ctk.CTkOptionMenu(
+            opts, variable=self._sbs_mode_var,
+            values=["parallel", "cross-eyed"])
+        self._sbs_mode_menu.grid(row=1, column=4, padx=8, pady=(0, 8), sticky="ew")
+
+        # Depth-only checkbox on its own row
         self._depth_only_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="Depth map only",
                         variable=self._depth_only_var).grid(
-            row=1, column=4, padx=8, pady=(0, 8))
+            row=2, column=2, columnspan=3, padx=8, pady=(0, 4), sticky="w")
 
         # Row 3 — sliders
         ctk.CTkLabel(opts, text="3D strength", anchor="w").grid(
@@ -239,7 +248,25 @@ class ConvertTab(ctk.CTkFrame):
             "write", lambda *_: self._blur_lbl.configure(
                 text=str(self._blur_var.get())))
 
-        self._on_mode_change("Images")  # set initial label
+        # Convergence (anaglyph only — shown/hidden by format)
+        self._conv_row_lbl = ctk.CTkLabel(
+            opts, text="Convergence (anaglyph)", anchor="w")
+        self._conv_row_lbl.grid(row=5, column=0, columnspan=2,
+                                 padx=8, sticky="w", pady=(4, 0))
+        self._conv_var = ctk.DoubleVar(value=0.5)
+        self._conv_slider = ctk.CTkSlider(
+            opts, from_=0.0, to=1.0, number_of_steps=20,
+            variable=self._conv_var)
+        self._conv_slider.grid(row=6, column=0, columnspan=2,
+                               padx=8, sticky="ew", pady=(0, 8))
+        self._conv_lbl = ctk.CTkLabel(opts, text="0.5")
+        self._conv_lbl.grid(row=6, column=2, padx=4, sticky="w")
+        self._conv_var.trace_add(
+            "write", lambda *_: self._conv_lbl.configure(
+                text=f"{self._conv_var.get():.2f}"))
+
+        self._on_mode_change("Images")   # set initial labels
+        self._on_format_change("sbs")    # hide convergence initially
 
         # ── log + button ──────────────────────────────────────────────────────
         self._log = LogPanel(self)
@@ -257,6 +284,19 @@ class ConvertTab(ctk.CTkFrame):
         else:
             self._model_lbl.configure(
                 text="Video Depth Anything — temporal streaming model")
+
+    def _on_format_change(self, value: str) -> None:
+        """Show convergence slider for anaglyph; hide viewing mode for anaglyph-only."""
+        show_conv = value in ("anaglyph", "both")
+        show_sbs_mode = value in ("sbs", "both")
+        state_conv = "normal" if show_conv else "disabled"
+        state_sbs  = "normal" if show_sbs_mode else "disabled"
+        self._conv_slider.configure(state=state_conv)
+        self._conv_row_lbl.configure(
+            text_color="#ccc" if show_conv else "#555")
+        self._conv_lbl.configure(
+            text_color="#ccc" if show_conv else "#555")
+        self._sbs_mode_menu.configure(state=state_sbs)
 
     # ── worker ────────────────────────────────────────────────────────────────
 
@@ -287,6 +327,8 @@ class ConvertTab(ctk.CTkFrame):
             depth_scale=self._depth_scale_var.get(),
             sbs_blur=self._blur_var.get(),
             depth_only=self._depth_only_var.get(),
+            output_format=self._output_format_var.get(),
+            convergence=round(self._conv_var.get(), 2),
         )
         threading.Thread(target=self._worker, args=(opts,), daemon=True).start()
 
@@ -346,6 +388,8 @@ class ConvertTab(ctk.CTkFrame):
                         depth_scale=opts["depth_scale"],
                         sbs_mode=opts["sbs_mode"],
                         sbs_blur=opts["sbs_blur"],
+                        output_format=opts["output_format"],
+                        convergence=opts["convergence"],
                         log=lambda msg: q.put(("log", msg)),
                     )
                     q.put(("progress", i + 1, len(files)))
