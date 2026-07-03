@@ -173,6 +173,7 @@ output/
 
 *.safetensors
 *.pth
+*.pt
 models/
 video_depth_anything_repo/checkpoints/
 
