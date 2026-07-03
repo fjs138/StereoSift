@@ -262,7 +262,7 @@ def _get_moondream():
 
 
 def _run_moondream(image_path: str) -> Dict[str, Any]:
-    """Ask moondream2 whether the image has structure defects using a 2-step query.
+    """Ask moondream2 whether the image has structure defects.
 
     Returns:
         {
@@ -278,49 +278,34 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     model = _get_moondream()
     img = Image.open(image_path).convert("RGB")
 
-    # Step 1: Binary check — reuse the same guardrails as _STRUCTURE_PROMPT so moondream
-    # doesn't flag normal multi-person images or minor imperfections.
-    p1 = (
-        "Does this image contain a major AI structure defect: "
-        "a clearly extra head, a second torso sharing one lower body, "
-        "or a visibly extra arm or leg beyond one plausible human body? "
-        "Answer NO for two separate people each with their own complete body. "
-        "Answer NO for hidden or cropped limbs, hands, pose, clothing, blur, or artistic style. "
-        "Answer YES or NO only."
+    prompt = (
+        "Judge only major duplicated or incorrectly joined human body structure. "
+        "FAIL only for a clearly extra head, a second torso sharing one lower body, "
+        "an extra arm or leg beyond a plausible human body, or visibly fused people/bodies. "
+        "Do not fail for hidden or cropped limbs, hands or fingers, pose, clothing, lighting, "
+        "blur, artistic style, or minor visual imperfections. "
+        "Reply exactly as one of: PASS; FAIL: <brief reason>; UNCERTAIN: <brief reason>."
     )
-    r1 = model.query(img, p1)
-    ans1 = r1["answer"].strip() if isinstance(r1, dict) else str(r1).strip()
-    ans1_upper = ans1.upper()
+    result = model.query(img, prompt)  # type: ignore
+    answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
 
-    if (re.search(r'\bNO\b', ans1_upper) and not re.search(r'\bYES\b', ans1_upper)) or "PASS" in ans1_upper:
-        return {
-            "verdict": "pass",
-            "structure_ok": True,
-            "structure_note": "PASS",
-            "raw": ans1,
-        }
-    elif re.search(r'\bYES\b', ans1_upper) or "FAIL" in ans1_upper:
-        # Step 2: Description
-        p2 = (
-            "Describe the duplicate human body structure in the image "
-            "(e.g. duplicate head, duplicate torso, extra limbs) in a few words."
-        )
-        r2 = model.query(img, p2)
-        ans2 = r2["answer"].strip() if isinstance(r2, dict) else str(r2).strip()
-        return {
-            "verdict": "fail",
-            "structure_ok": False,
-            "structure_note": f"FAIL: {ans2}",
-            "raw": f"Step 1: {ans1} | Step 2: {ans2}",
-        }
+    # Parse response using word-boundary matching to avoid false matches
+    answer_upper = answer.upper()
+    if re.search(r'\bPASS\b', answer_upper):
+        verdict = "pass"
+    elif re.search(r'\bFAIL\b', answer_upper):
+        verdict = "fail"
+    elif re.search(r'\bUNCERTAIN\b', answer_upper):
+        verdict = "uncertain"
     else:
-        # Fallback/Uncertain
-        return {
-            "verdict": "uncertain",
-            "structure_ok": False,
-            "structure_note": f"UNCERTAIN: {ans1}",
-            "raw": ans1,
-        }
+        verdict = "uncertain"
+
+    return {
+        "verdict": verdict,
+        "structure_ok": verdict == "pass",
+        "structure_note": answer,
+        "raw": answer,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -439,10 +424,11 @@ def classify_image(
         try:
             pose_data = _run_yolo_pose(image_path)
             pose_issues = _check_pose_anomalies(pose_data["keypoints"], pose_data["boxes"])
-            for issue in pose_issues:
-                issues.append(f"major structure defect: {issue}")
-        except Exception:
-            pass
+            if pose_issues:
+                for issue in pose_issues:
+                    issues.append(f"major structure defect: {issue}")
+        except Exception as e:
+            print(f"[YOLO pose error] {e}")
 
     # ── 3. Moondream2 deep scan ───────────────────────────────────────────────
     # Skip Moondream2 if a major structure defect has already been identified

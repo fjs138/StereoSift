@@ -276,31 +276,34 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(len(result["issues"]), 0)
 
     @patch("qc_pipeline._get_moondream")
-    def test_two_step_moondream_pass(self, mock_get_moondream):
+    def test_moondream_pass(self, mock_get_moondream):
         model = Mock()
-        # Step 1 returns "NO"
-        model.query.side_effect = [{"answer": "NO"}]
+        model.query.return_value = {"answer": "PASS"}
         mock_get_moondream.return_value = model
 
         result = _run_moondream(self.image_path)
         self.assertTrue(result["structure_ok"])
         self.assertEqual(result["verdict"], "pass")
-        self.assertEqual(result["structure_note"], "PASS")
 
     @patch("qc_pipeline._get_moondream")
-    def test_two_step_moondream_fail(self, mock_get_moondream):
+    def test_moondream_fail(self, mock_get_moondream):
         model = Mock()
-        # Step 1 returns "YES", Step 2 returns "two heads detected"
-        model.query.side_effect = [
-            {"answer": "YES"},
-            {"answer": "two heads detected"}
-        ]
+        model.query.return_value = {"answer": "FAIL: two heads detected"}
         mock_get_moondream.return_value = model
 
         result = _run_moondream(self.image_path)
         self.assertFalse(result["structure_ok"])
         self.assertEqual(result["verdict"], "fail")
-        self.assertEqual(result["structure_note"], "FAIL: two heads detected")
+
+    @patch("qc_pipeline._get_moondream")
+    def test_moondream_uncertain(self, mock_get_moondream):
+        model = Mock()
+        model.query.return_value = {"answer": "UNCERTAIN: torso partially obscured"}
+        mock_get_moondream.return_value = model
+
+        result = _run_moondream(self.image_path)
+        self.assertFalse(result["structure_ok"])
+        self.assertEqual(result["verdict"], "uncertain")
 
 
 if __name__ == "__main__":
