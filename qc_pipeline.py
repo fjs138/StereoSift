@@ -63,18 +63,9 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 _YOLO_DIR          = Path(__file__).parent / "models" / "yolo"
 _YOLO_DETECT_FILE  = "yolo11n.pt"
+_YOLO_POSE_FILE    = "yolo11n-pose.pt"
 _MOONDREAM_REPO    = "vikhyatk/moondream2"
 _MOONDREAM_REVISION = "2025-01-09"   # pinned for reproducibility
-
-# Structure-check prompt sent to moondream2.
-_STRUCTURE_PROMPT = (
-    "Judge only major duplicated or incorrectly joined human body structure. "
-    "FAIL only for a clearly extra head, a second torso sharing one lower body, "
-    "an extra arm or leg beyond a plausible human body, or visibly fused people/bodies. "
-    "Do not fail for hidden or cropped limbs, hands or fingers, pose, clothing, lighting, "
-    "blur, artistic style, or minor visual imperfections. "
-    "Reply exactly as one of: PASS; FAIL: <brief reason>; UNCERTAIN: <brief reason>."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +73,7 @@ _STRUCTURE_PROMPT = (
 # ---------------------------------------------------------------------------
 
 _yolo_detect_cache: Any   = None
+_yolo_pose_cache: Any     = None
 _moondream_cache: Any = None   # model singleton
 
 
@@ -96,16 +88,28 @@ def _get_yolo_detect():
     return _yolo_detect_cache
 
 
+def _get_yolo_pose():
+    global _yolo_pose_cache
+    if _yolo_pose_cache is None:
+        _yolo_pose_cache = _load_yolo(_YOLO_POSE_FILE)
+    return _yolo_pose_cache
+
+
 def _load_yolo(filename: str):
     """Load YOLO, downloading to ``models/yolo/`` if not present."""
     from ultralytics import YOLO
     _YOLO_DIR.mkdir(parents=True, exist_ok=True)
     path = _YOLO_DIR / filename
     if not path.exists():
-        print(f"Downloading {filename} → {_YOLO_DIR} …")
-        tmp = YOLO(filename)
-        shutil.copy2(Path(tmp.ckpt_path), path)
-        print(f"Saved {path}")
+        root_path = Path(__file__).parent / filename
+        if root_path.exists():
+            shutil.copy2(root_path, path)
+            print(f"Copied {filename} from workspace root → {_YOLO_DIR}")
+        else:
+            print(f"Downloading {filename} → {_YOLO_DIR} …")
+            tmp = YOLO(filename)
+            shutil.copy2(Path(tmp.ckpt_path), path)
+            print(f"Saved {path}")
     return YOLO(str(path))
 
 
@@ -135,6 +139,105 @@ def _run_yolo(image_path: str) -> Dict[str, Any]:
     return {"person_count": person_count, "detections": detected}
 
 
+def _run_yolo_pose(image_path: str) -> Dict[str, Any]:
+    """Run YOLO pose detection to get keypoints and boxes for duplicate structure check."""
+    model = _get_yolo_pose()
+    results = model(image_path, verbose=False)[0]
+    boxes = results.boxes
+    keypoints = results.keypoints
+
+    kp_list = []
+    box_list = []
+    if keypoints is not None and len(keypoints) and keypoints.conf is not None:
+        xy = keypoints.xy.cpu().numpy() if hasattr(keypoints.xy, "cpu") else keypoints.xy
+        conf = keypoints.conf.cpu().numpy() if hasattr(keypoints.conf, "cpu") else keypoints.conf
+        box_coords = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else boxes.xyxy
+
+        for i in range(len(xy)):
+            kp_list.append({
+                "xy": xy[i],
+                "conf": conf[i]
+            })
+            box_list.append(box_coords[i])
+
+    return {"keypoints": kp_list, "boxes": box_list}
+
+
+def _check_pose_anomalies(keypoints_list: List[Dict[str, Any]], boxes_list: List[Any]) -> List[str]:
+    """Analyze keypoints and boxes of detected persons to find duplicates.
+
+    Specifically looks for two person detections that share a lower body
+    (hips/knees/ankles are very close) but have distinct upper bodies
+    (shoulders/heads are separated).
+    """
+    issues = []
+    num_persons = len(keypoints_list)
+    if num_persons < 2:
+        return issues
+
+    T_close = 0.08
+    T_far = 0.15
+
+    for i in range(num_persons):
+        for j in range(i + 1, num_persons):
+            box_i = boxes_list[i]
+            box_j = boxes_list[j]
+
+            w_i, h_i = box_i[2] - box_i[0], box_i[3] - box_i[1]
+            w_j, h_j = box_j[2] - box_j[0], box_j[3] - box_j[1]
+
+            scale = (max(w_i, h_i) + max(w_j, h_j)) / 2.0
+            if scale <= 0:
+                continue
+
+            xy_i = keypoints_list[i]['xy']
+            conf_i = keypoints_list[i]['conf']
+            xy_j = keypoints_list[j]['xy']
+            conf_j = keypoints_list[j]['conf']
+
+            def kp_dist(k):
+                if conf_i[k] > 0.35 and conf_j[k] > 0.35:
+                    return ((xy_i[k][0] - xy_j[k][0])**2 + (xy_i[k][1] - xy_j[k][1])**2)**0.5 / scale
+                return None
+
+            # Gather lower body distances
+            hips = [d for d in [kp_dist(11), kp_dist(12)] if d is not None]
+            knees = [d for d in [kp_dist(13), kp_dist(14)] if d is not None]
+            ankles = [d for d in [kp_dist(15), kp_dist(16)] if d is not None]
+
+            # Gather upper body distances
+            shoulders = [d for d in [kp_dist(5), kp_dist(6)] if d is not None]
+            head_pts = [d for d in [kp_dist(0), kp_dist(1), kp_dist(2), kp_dist(3), kp_dist(4)] if d is not None]
+
+            # Assess sharing lower body
+            shares_lower = False
+            if hips and sum(hips)/len(hips) < T_close:
+                shares_lower = True
+            elif knees and sum(knees)/len(knees) < T_close:
+                shares_lower = True
+            elif ankles and sum(ankles)/len(ankles) < T_close:
+                shares_lower = True
+            elif hips and min(hips) < 0.06:
+                shares_lower = True
+
+            # Assess shoulder & head separation
+            shoulders_separated = len(shoulders) > 0 and sum(shoulders)/len(shoulders) > T_far
+            head_separated = len(head_pts) > 0 and sum(head_pts)/len(head_pts) > T_far
+
+            # Assess shoulder & head closeness
+            shoulders_close = len(shoulders) > 0 and sum(shoulders)/len(shoulders) < T_close
+
+            if shares_lower:
+                if shoulders_separated:
+                    issues.append("duplicate torso: sharing a lower body but having separated torsos")
+                elif head_separated and shoulders_close:
+                    issues.append("duplicate head: sharing a torso but having separated heads")
+                elif head_separated:
+                    issues.append("duplicate head: sharing a lower body but having separated heads")
+
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Moondream2 deep scan
 # ---------------------------------------------------------------------------
@@ -159,10 +262,11 @@ def _get_moondream():
 
 
 def _run_moondream(image_path: str) -> Dict[str, Any]:
-    """Ask moondream2 whether the image has structure defects.
+    """Ask moondream2 whether the image has structure defects using a 2-step query.
 
     Returns:
         {
+          "verdict": str,       # "pass", "fail", "uncertain"
           "structure_ok": bool,   # True = no defects found
           "structure_note": str,  # model's description
           "raw": str,           # full model response
@@ -174,19 +278,49 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     model = _get_moondream()
     img = Image.open(image_path).convert("RGB")
 
-    # Use the query() API directly — cleaner than encode_image + answer_question.
-    result = model.query(img, _STRUCTURE_PROMPT)  # type: ignore
-    answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
+    # Step 1: Binary check — reuse the same guardrails as _STRUCTURE_PROMPT so moondream
+    # doesn't flag normal multi-person images or minor imperfections.
+    p1 = (
+        "Does this image contain a major AI structure defect: "
+        "a clearly extra head, a second torso sharing one lower body, "
+        "or a visibly extra arm or leg beyond one plausible human body? "
+        "Answer NO for two separate people each with their own complete body. "
+        "Answer NO for hidden or cropped limbs, hands, pose, clothing, blur, or artistic style. "
+        "Answer YES or NO only."
+    )
+    r1 = model.query(img, p1)
+    ans1 = r1["answer"].strip() if isinstance(r1, dict) else str(r1).strip()
+    ans1_upper = ans1.upper()
 
-    first_word = answer.split()[0].upper().rstrip(".,:") if answer else "UNCERTAIN"
-    verdict = first_word if first_word in {"PASS", "FAIL", "UNCERTAIN"} else "UNCERTAIN"
-
-    return {
-        "verdict":      verdict.lower(),
-        "structure_ok":   verdict == "PASS",
-        "structure_note": answer,
-        "raw":          answer,
-    }
+    if (re.search(r'\bNO\b', ans1_upper) and not re.search(r'\bYES\b', ans1_upper)) or "PASS" in ans1_upper:
+        return {
+            "verdict": "pass",
+            "structure_ok": True,
+            "structure_note": "PASS",
+            "raw": ans1,
+        }
+    elif re.search(r'\bYES\b', ans1_upper) or "FAIL" in ans1_upper:
+        # Step 2: Description
+        p2 = (
+            "Describe the duplicate human body structure in the image "
+            "(e.g. duplicate head, duplicate torso, extra limbs) in a few words."
+        )
+        r2 = model.query(img, p2)
+        ans2 = r2["answer"].strip() if isinstance(r2, dict) else str(r2).strip()
+        return {
+            "verdict": "fail",
+            "structure_ok": False,
+            "structure_note": f"FAIL: {ans2}",
+            "raw": f"Step 1: {ans1} | Step 2: {ans2}",
+        }
+    else:
+        # Fallback/Uncertain
+        return {
+            "verdict": "uncertain",
+            "structure_ok": False,
+            "structure_note": f"UNCERTAIN: {ans1}",
+            "raw": ans1,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +427,7 @@ def classify_image(
     # Exposure and contrast are recorded for diagnostics only. They do not
     # influence structural-structure judgment.
 
-    # ── 2. YOLO detection ─────────────────────────────────────────────────────
+    # ── 2. YOLO detection & Pose Checks ───────────────────────────────────────
     if settings.use_yolo:
         try:
             yolo = _run_yolo(image_path)
@@ -302,10 +436,20 @@ def classify_image(
         except Exception:
             pass
 
+        try:
+            pose_data = _run_yolo_pose(image_path)
+            pose_issues = _check_pose_anomalies(pose_data["keypoints"], pose_data["boxes"])
+            for issue in pose_issues:
+                issues.append(f"major structure defect: {issue}")
+        except Exception:
+            pass
+
     # ── 3. Moondream2 deep scan ───────────────────────────────────────────────
+    # Skip Moondream2 if a major structure defect has already been identified
     run_deep = (
         settings.use_deep_scan
         and (not settings.deep_scan_persons_only or person_count > 0)
+        and not any("major structure defect" in issue for issue in issues)
     )
     if run_deep:
         try:
@@ -325,10 +469,8 @@ def classify_image(
         status = "fail"
         score = 0.0
     elif any("uncertain structure" in issue or "deep scan skipped" in issue for issue in issues):
-        # Conservative routing: anything not confidently PASS belongs in the
-        # single review queue. This favors catching defects over precision.
-        status = "fail"
-        score = 25.0
+        status = "warning"
+        score = 50.0
     else:
         status = "pass"
         score = 100.0
