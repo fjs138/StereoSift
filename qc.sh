@@ -12,13 +12,13 @@ fi
 
 printf '\nStereoSift visual judgment\n'
 printf 'Originals are copied by default, never moved.\n\n'
-printf 'Input image or directory [%s]: ' "$HOME/Downloads/dump"
+printf 'Input image or directory [%s]: ' "$SCRIPT_DIR/input"
 IFS= read -r INPUT_PATH || exit 1
-[ -n "$INPUT_PATH" ] || INPUT_PATH="$HOME/Downloads/dump"
+[ -n "$INPUT_PATH" ] || INPUT_PATH="$SCRIPT_DIR/input"
 
-printf 'Results directory [%s]: ' "$HOME/StereoSift-QC"
+printf 'Results directory [%s]: ' "$SCRIPT_DIR/output/qc"
 IFS= read -r OUTPUT_PATH || exit 1
-[ -n "$OUTPUT_PATH" ] || OUTPUT_PATH="$HOME/StereoSift-QC"
+[ -n "$OUTPUT_PATH" ] || OUTPUT_PATH="$SCRIPT_DIR/output/qc"
 
 printf 'Vision backend URL (leave blank for basic non-AI checks): '
 IFS= read -r BACKEND_URL || exit 1

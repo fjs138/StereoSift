@@ -194,7 +194,7 @@ def collect_videos(input_path):
     raise FileNotFoundError(f"Input not found: {input_path}")
 
 
-def convert_video_to_sbs(
+def _convert_video_per_frame(
     video_path,
     output_dir,
     model,
@@ -215,31 +215,35 @@ def convert_video_to_sbs(
     depth_only=False,
     log=print,
 ):
-    """Convert a video to SBS 3D using frame-by-frame depth estimation.
+    """Convert a video to SBS 3D using the image depth model frame-by-frame.
 
-    This uses the existing DepthAnythingV2 image model per frame as a fallback,
-    plus temporal smoothing for stable video output.
+    This is a fallback path used when Video Depth Anything is unavailable.
+    It runs the DepthAnythingV2 image model on each frame individually with
+    optional temporal smoothing to reduce flicker.
 
     Args:
         video_path: Path to input video file.
         output_dir: Directory for output files.
+        model: DepthAnythingV2 image depth model.
         device: Computation device.
-        sbs_method: "mesh_warping" or "grid_sampling".
-        depth_scale: SBS 3D strength.
-        sbs_mode: "parallel" or "cross-eyed".
+        dtype: Model dtype.
+        is_metric: Whether the model produces metric depth.
+        sbs_method: ``"mesh_warping"`` or ``"grid_sampling"``.
+        depth_scale: SBS stereo strength.
+        sbs_mode: ``"parallel"`` or ``"cross-eyed"``.
         sbs_blur: Depth blur strength (odd number).
-        depth_input_scale: Scale used for per-frame depth inference.
-        max_len: Maximum frames (-1 = all).
-        target_fps: Target FPS (-1 = original).
-        max_res: Maximum resolution dimension.
-        input_size: Input size for depth model.
-        temporal_smoothing: Temporal smoothing (0.0-0.5).
-        batch_size: Frames per processing batch.
-        depth_only: Save only depth maps (no SBS).
-        log: Logging function.
+        depth_input_scale: Downscale factor before depth inference.
+        max_len: Maximum frames to process (-1 = all).
+        target_fps: Output frame rate (-1 = match source).
+        max_res: Longest edge cap in pixels (-1 = no limit).
+        input_size: Input size for the depth model.
+        temporal_smoothing: Blend factor with previous frame depth (0–0.5).
+        batch_size: Frames per SBS processing batch.
+        depth_only: Save depth visualisation only (no SBS).
+        log: Logging callable.
 
     Returns:
-        bool: True if successful.
+        ``True`` if successful.
     """
     import imageio
 
@@ -426,8 +430,8 @@ def main():
     if is_video_input:
         # Video processing mode
         from video_converter import (
-            convert_video_to_sbs as convert_video_with_vda,
-            load_video_depth_anything_model,
+            convert_video_to_sbs,
+            load_video_depth_model,
         )
 
         try:
@@ -452,11 +456,10 @@ def main():
 
         try:
             print(f"Loading official Video Depth Anything ({args.video_encoder})...")
-            video_model, video_dtype, video_is_metric = load_video_depth_anything_model(
+            video_model, video_dtype, video_is_metric = load_video_depth_model(
                 encoder=args.video_encoder,
                 metric=args.video_metric,
                 device=device,
-                streaming=True,
             )
         except Exception as e:
             print(f"Failed to load Video Depth Anything: {e}")
@@ -466,7 +469,7 @@ def main():
             for video_path in videos:
                 pbar.set_postfix_str(os.path.basename(video_path)[:40], refresh=False)
                 try:
-                    if convert_video_with_vda(
+                    if convert_video_to_sbs(
                         video_path=video_path,
                         output_dir=args.output_dir,
                         model=video_model,
