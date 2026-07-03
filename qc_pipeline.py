@@ -199,8 +199,9 @@ def _pixel_stats(image_path: str) -> Dict[str, float]:
     if Image is None:
         return {"brightness": 0.5, "contrast": 0.2}
     img  = Image.open(image_path).convert("L")
-    data = list(img.getdata())
-    vals = [v / 255.0 for v in data]
+    # getdata() is deprecated in Pillow 14; use tobytes() instead.
+    raw  = img.tobytes()
+    vals = [v / 255.0 for v in raw]
     mean = sum(vals) / len(vals) if vals else 0.5
     std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 if vals else 0.2
     return {"brightness": mean, "contrast": std}
