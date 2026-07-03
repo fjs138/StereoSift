@@ -283,7 +283,10 @@ def convert_video_to_sbs(
         cap.release()
         writer.close()
 
-    # Mux original audio into the finished video without re-encoding.
+    # Mux original audio and embed SBS stereo metadata.
+    # The stereo_mode flag tells compliant players (Meta Quest, etc.) that
+    # this is a left-right side-by-side 3D video without requiring a
+    # special filename convention.
     try:
         import imageio_ffmpeg
         result = subprocess.run(
@@ -292,6 +295,10 @@ def convert_video_to_sbs(
                 "-i", tmp_video, "-i", video_path,
                 "-map", "0:v:0", "-map", "1:a?",
                 "-c:v", "copy", "-c:a", "aac", "-shortest",
+                # MKV/MP4 stereo layout: 1 = side-by-side (left eye left)
+                "-metadata:s:v:0", "stereo_mode=left_right",
+                # Human-readable container metadata
+                "-metadata", "comment=SBS 3D left-right",
                 out_path,
             ],
             capture_output=True,
@@ -301,7 +308,7 @@ def convert_video_to_sbs(
             raise RuntimeError(result.stderr.strip().splitlines()[-1])
         os.remove(tmp_video)
     except Exception as exc:
-        print(f"Warning: audio could not be copied ({exc}); saving video without audio.")
+        print(f"Warning: audio/metadata mux failed ({exc}); saving video-only.")
         os.replace(tmp_video, out_path)
 
     print(f"Saved: {out_path}")
