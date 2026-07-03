@@ -52,10 +52,16 @@ def _browse_input(var: ctk.StringVar, parent) -> None:
         var.set(path)
 
 
-def _browse_folder(var: ctk.StringVar, parent) -> None:
+def _browse_folder(var: ctk.StringVar, parent, output_var_to_update: ctk.StringVar | None = None) -> None:
+    """Open exactly one folder chooser and optionally suggest a sibling output folder."""
     path = filedialog.askdirectory(parent=parent)
     if path:
         var.set(path)
+        if output_var_to_update and not output_var_to_update.get():
+            default_output = os.path.join(
+                os.path.dirname(path), f"{os.path.basename(path)}-judged"
+            )
+            output_var_to_update.set(default_output)
 
 
 def _open_folder(path: str) -> None:
@@ -255,7 +261,7 @@ class ConvertTab(ctk.CTkFrame):
                                  padx=8, sticky="w", pady=(4, 0))
         self._conv_var = ctk.DoubleVar(value=0.5)
         self._conv_slider = ctk.CTkSlider(
-            opts, from_=0.0, to=1.0, number_of_steps=20,
+            opts, from_=0.0, to=1.0, number_of_steps=20,  # type: ignore
             variable=self._conv_var)
         self._conv_slider.grid(row=6, column=0, columnspan=2,
                                padx=8, sticky="ew", pady=(0, 8))
@@ -439,6 +445,7 @@ class JudgeTab(ctk.CTkFrame):
         self._running = False
         self._results: list[dict] = []
         self._result_row = 1
+        self._stop_event = threading.Event()
         self._build()
         self._poll()
 
@@ -451,16 +458,15 @@ class JudgeTab(ctk.CTkFrame):
         ctk.CTkLabel(paths, text="Input folder", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
         self._input_var = ctk.StringVar()
+        self._output_var = ctk.StringVar()
         ctk.CTkEntry(paths, textvariable=self._input_var).grid(
             row=0, column=1, sticky="ew", pady=5)
         ctk.CTkButton(paths, text="Browse", width=80,
-                      command=lambda: _browse_folder(self._input_var, self)).grid(
+                      command=lambda: _browse_folder(self._input_var, self, self._output_var)).grid(
             row=0, column=2, padx=(6, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
-        self._output_var = ctk.StringVar(
-            value=os.path.join(os.getcwd(), "output", "qc"))
         ctk.CTkEntry(paths, textvariable=self._output_var).grid(
             row=1, column=1, sticky="ew", pady=5)
         ctk.CTkButton(paths, text="Browse", width=80,
@@ -489,22 +495,13 @@ class JudgeTab(ctk.CTkFrame):
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
 
         # Deep scan toggle
-        self._deep_scan_var = ctk.BooleanVar(value=False)
+        self._deep_scan_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             opts,
-            text="Deep scan (moondream2) — checks structure on person images",
+            text="Deep scan (moondream2) — major duplicated/fused figures only",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
-
-        # Strictness
-        ctk.CTkLabel(opts, text="Strictness", anchor="w").grid(
-            row=3, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._strictness_var = ctk.StringVar(value="balanced")
-        ctk.CTkOptionMenu(
-            opts, variable=self._strictness_var,
-            values=["relaxed", "balanced", "strict"],
-        ).grid(row=3, column=1, sticky="w", padx=(0, 8), pady=4)
 
         # ── optional backend ──────────────────────────────────────────────────
         adv_toggle = ctk.CTkButton(
@@ -513,7 +510,7 @@ class JudgeTab(ctk.CTkFrame):
             anchor="w", font=ctk.CTkFont(size=11),
             command=self._toggle_advanced,
         )
-        adv_toggle.grid(row=4, column=0, columnspan=2,
+        adv_toggle.grid(row=3, column=0, columnspan=2,
                         sticky="w", padx=6, pady=(4, 2))
         self._adv_toggle_btn = adv_toggle
 
@@ -579,16 +576,22 @@ class JudgeTab(ctk.CTkFrame):
         btn_row.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="ew")
         btn_row.grid_columnconfigure(0, weight=1)
         btn_row.grid_columnconfigure(1, weight=1)
+        btn_row.grid_columnconfigure(2, weight=1)
 
         self._run_btn = ctk.CTkButton(
             btn_row, text="Run QC", height=38, command=self._run)
         self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
+        self._stop_btn = ctk.CTkButton(
+            btn_row, text="Stop QC", height=38, command=self._stop, state="disabled",
+            fg_color="#cc2222", hover_color="#dd3333")
+        self._stop_btn.grid(row=0, column=1, padx=(4, 4), sticky="ew")
+
         ctk.CTkButton(
             btn_row, text="Open output folder", height=38,
             fg_color="#444", hover_color="#555",
             command=lambda: _open_folder(self._output_var.get().strip()),
-        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
     def _toggle_advanced(self):
         if self._adv_visible:
@@ -633,6 +636,9 @@ class JudgeTab(ctk.CTkFrame):
             messagebox.showwarning("Missing input",
                                    "Please select an input folder.")
             return
+        if not self._output_var.get().strip():
+            messagebox.showwarning("Missing output", "Please select an output folder.")
+            return
         if self._move_var.get():
             if not messagebox.askyesno(
                 "Move files?",
@@ -642,7 +648,9 @@ class JudgeTab(ctk.CTkFrame):
                 return
 
         self._running = True
+        self._stop_event.clear()  # Clear any previous stop signal
         self._run_btn.configure(state="disabled", text="Running…")
+        self._stop_btn.configure(state="normal") # Enable stop button
         self._log.clear()
         self._log.start_spin()
 
@@ -661,11 +669,17 @@ class JudgeTab(ctk.CTkFrame):
             model_name=self._backend_model_var.get().strip(),
             move_files=self._move_var.get(),
             deep_scan=self._deep_scan_var.get(),
-            strictness=self._strictness_var.get(),
         )
-        threading.Thread(target=self._worker, args=(opts,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(opts, self._stop_event,), daemon=True).start()
 
-    def _worker(self, opts: dict):
+    def _stop(self):
+        self._stop_event.set()
+        self._stop_btn.configure(state="disabled", text="Stopping…")
+        self._run_btn.configure(state="disabled") # Also disable run button while stopping
+        self._log.log("Stopping QC pipeline...")
+
+
+    def _worker(self, opts: dict, stop_event: threading.Event):
         q = self._q
         try:
             from qc_pipeline import collect_images, classify_image, \
@@ -687,12 +701,15 @@ class JudgeTab(ctk.CTkFrame):
             settings = QCSettings(
                 use_yolo=True,
                 use_deep_scan=opts["deep_scan"],
-                deep_scan_strictness=opts["strictness"],
             )
 
             q.put(("log", f"Found {len(images)} image(s)"))
             results = []
             for i, path in enumerate(images):
+                if stop_event.is_set():
+                    q.put(("stopped", "QC pipeline stopped by user."))
+                    return
+
                 q.put(("progress", i, len(images)))
                 q.put(("log",
                        f"[{i+1}/{len(images)}] {os.path.basename(path)}"))
@@ -731,6 +748,7 @@ class JudgeTab(ctk.CTkFrame):
             q.put(("log", tb))
             q.put(("error", tb.splitlines()[-1]))
 
+
     def _poll(self):
         try:
             while True:
@@ -749,11 +767,19 @@ class JudgeTab(ctk.CTkFrame):
                     self._log.stop()
                     self._log.log(msg[1])
                     self._run_btn.configure(state="normal", text="Run QC")
+                    self._stop_btn.configure(state="disabled", text="Stop QC")
                     self._running = False
                 elif kind == "error":
                     self._log.stop()
                     messagebox.showerror("Error", msg[1])
                     self._run_btn.configure(state="normal", text="Run QC")
+                    self._stop_btn.configure(state="disabled", text="Stop QC")
+                    self._running = False
+                elif kind == "stopped":
+                    self._log.stop()
+                    self._log.log(msg[1])
+                    self._run_btn.configure(state="normal")
+                    self._stop_btn.configure(state="disabled", text="Stop QC")
                     self._running = False
         except queue.Empty:
             pass

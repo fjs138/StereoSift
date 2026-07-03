@@ -1,0 +1,32 @@
+import unittest
+from unittest.mock import patch
+
+from gui import _browse_folder
+
+
+class FakeVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class TestGuiBrowseHelpers(unittest.TestCase):
+    @patch("gui.filedialog.askdirectory", return_value="/pictures/to-review")
+    def test_judge_browse_opens_one_folder_dialog_and_suggests_output(self, askdirectory):
+        input_var = FakeVar()
+        output_var = FakeVar()
+
+        _browse_folder(input_var, object(), output_var)
+
+        askdirectory.assert_called_once()
+        self.assertEqual(input_var.get(), "/pictures/to-review")
+        self.assertEqual(output_var.get(), "/pictures/to-review-judged")
+
+
+if __name__ == "__main__":
+    unittest.main()
