@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import unittest
 
-from qc_pipeline import collect_images, run_qc
+from qc_pipeline import QCSettings, collect_images, run_qc
 
 
 class TestQCPipeline(unittest.TestCase):
@@ -26,7 +26,11 @@ class TestQCPipeline(unittest.TestCase):
 
     def test_run_qc_creates_report_and_folders(self):
         output_dir = os.path.join(self.tmpdir, "out")
-        results = run_qc(self.input_dir, output_dir)
+        results = run_qc(
+            self.input_dir,
+            output_dir,
+            settings=QCSettings(use_yolo=False, use_deep_scan=False),
+        )
         self.assertEqual(len(results), 2)
         self.assertTrue(os.path.exists(os.path.join(self.input_dir, "good.png")))
         self.assertTrue(os.path.exists(os.path.join(self.input_dir, "dark.png")))
