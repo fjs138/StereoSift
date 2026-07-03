@@ -88,6 +88,25 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["score"], 100.0)
 
+    @patch("qc_pipeline._run_moondream")
+    @patch("qc_pipeline._run_yolo")
+    def test_uncertain_structure_enters_failure_review_queue(self, mock_yolo, mock_moondream):
+        mock_yolo.return_value = {"person_count": 1, "detections": ["person"]}
+        mock_moondream.return_value = {
+            "verdict": "uncertain", "structure_ok": False,
+            "structure_note": "UNCERTAIN: the torso is partly obscured.",
+            "raw": "UNCERTAIN: the torso is partly obscured.",
+        }
+
+        result = classify_image(
+            self.image_path,
+            os.path.join(self.tmpdir, "out"),
+            settings=QCSettings(use_yolo=True, use_deep_scan=True),
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["score"], 25.0)
+
 
 if __name__ == "__main__":
     unittest.main()

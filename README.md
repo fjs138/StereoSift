@@ -125,6 +125,12 @@ Results are sorted into `pass/`, `warning/`, `fail/`, and a `report.json` summar
 Originals are copied by default. Add `--move` only when destructive sorting is
 explicitly desired.
 
+Local judgment is intentionally conservative: only an explicit, confident
+structural `PASS` enters `pass/`. Clear defects, uncertain verdicts, malformed
+responses, and scan failures all enter `fail/`, making that folder the single
+manual-review queue. Exposure and other minor aesthetic issues do not affect
+the verdict.
+
 ### QC pipeline layers
 
 | Layer | Model | What it catches |

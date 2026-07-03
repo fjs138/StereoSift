@@ -148,7 +148,7 @@ def _get_moondream():
         print(f"Loading moondream2 ({_MOONDREAM_REPO} @ {_MOONDREAM_REVISION}) …")
         model = AutoModelForCausalLM.from_pretrained(
             _MOONDREAM_REPO, revision=_MOONDREAM_REVISION,
-            trust_remote_code=True, torch_dtype=torch.float32)
+            trust_remote_code=True, dtype=torch.float32)
         device = (torch.device("cuda") if torch.cuda.is_available()
                   else torch.device("mps") if torch.backends.mps.is_available()
                   else torch.device("cpu"))
@@ -325,8 +325,10 @@ def classify_image(
         status = "fail"
         score = 0.0
     elif any("uncertain structure" in issue or "deep scan skipped" in issue for issue in issues):
-        status = "warning"
-        score = 50.0
+        # Conservative routing: anything not confidently PASS belongs in the
+        # single review queue. This favors catching defects over precision.
+        status = "fail"
+        score = 25.0
     else:
         status = "pass"
         score = 100.0
