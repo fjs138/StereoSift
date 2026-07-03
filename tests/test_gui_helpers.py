@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from gui import _browse_folder
+from gui import _browse_file, _browse_folder
 
 
 class FakeVar:
@@ -16,6 +16,15 @@ class FakeVar:
 
 
 class TestGuiBrowseHelpers(unittest.TestCase):
+    @patch("gui.filedialog.askopenfilename", return_value="/pictures/photo.jpg")
+    def test_convert_file_browse_opens_one_file_dialog(self, askopenfilename):
+        input_var = FakeVar()
+
+        _browse_file(input_var, object())
+
+        askopenfilename.assert_called_once()
+        self.assertEqual(input_var.get(), "/pictures/photo.jpg")
+
     @patch("gui.filedialog.askdirectory", return_value="/pictures/to-review")
     def test_judge_browse_opens_one_folder_dialog_and_suggests_output(self, askdirectory):
         input_var = FakeVar()
