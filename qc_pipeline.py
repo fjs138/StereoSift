@@ -160,17 +160,52 @@ def _run_yolo_pose(image_path: str) -> Dict[str, Any]:
 def _check_pose_anomalies(keypoints_list: List[Dict[str, Any]], boxes_list: List[Any]) -> List[str]:
     """Analyze keypoints and boxes of detected persons to find duplicates.
 
-    Specifically looks for two person detections that share a lower body
-    (hips/knees/ankles are very close) but have distinct upper bodies
-    (shoulders/heads are separated).
+    Checks two cases:
+    1. Single skeleton with corrupted geometry (e.g., eyes too far apart = split head)
+    2. Two skeletons that share lower body but have separated upper body (fused figures)
     """
     issues = []
     num_persons = len(keypoints_list)
+
+    # ── Check single skeleton for internal corruption ───────────────────────────
+    if num_persons == 1:
+        xy = keypoints_list[0]['xy']
+        conf = keypoints_list[0]['conf']
+        box = boxes_list[0]
+        scale = max(box[2] - box[0], box[3] - box[1])
+
+        # Eyes too far apart = likely head duplication/split
+        if conf[1] > 0.35 and conf[2] > 0.35:
+            eye_dist = ((xy[1][0] - xy[2][0])**2 + (xy[1][1] - xy[2][1])**2)**0.5 / scale
+            if eye_dist > 0.13:  # Normal ~0.05-0.10, corrupted >0.13
+                issues.append("duplicate head: eye keypoints too far apart (split head)")
+
+        # Nose off-center from eyes = one nose serving two heads
+        if conf[0] > 0.35 and conf[1] > 0.35 and conf[2] > 0.35:
+            nose = xy[0]
+            l_eye = xy[1]
+            r_eye = xy[2]
+            eye_center_x = (l_eye[0] + r_eye[0]) / 2
+            nose_offset = abs(nose[0] - eye_center_x) / scale
+            if nose_offset > 0.12:  # Nose significantly off-center
+                issues.append("duplicate head: nose offset from eye centerline (fused figures)")
+
+        # Ears too far apart relative to eye distance
+        if conf[1] > 0.35 and conf[3] > 0.35 and conf[4] > 0.35:
+            l_eye = xy[1]
+            r_eye = xy[2]
+            l_ear = xy[3]
+            r_ear = xy[4]
+            ear_spread = ((l_ear[0] - r_ear[0])**2 + (l_ear[1] - r_ear[1])**2)**0.5 / scale
+            if ear_spread > 0.35:
+                issues.append("duplicate head: ear keypoints too far apart")
+
     if num_persons < 2:
         return issues
 
-    T_close = 0.08
-    T_far = 0.15
+    T_close = 0.10  # Relaxed from 0.08 to catch more duplicates
+    T_far = 0.12    # Relaxed from 0.15 for better separation detection
+    T_vertical_overlap = 0.25  # Hips in similar Y-range = likely same person
 
     for i in range(num_persons):
         for j in range(i + 1, num_persons):
@@ -203,9 +238,40 @@ def _check_pose_anomalies(keypoints_list: List[Dict[str, Any]], boxes_list: List
             shoulders = [d for d in [kp_dist(5), kp_dist(6)] if d is not None]
             head_pts = [d for d in [kp_dist(0), kp_dist(1), kp_dist(2), kp_dist(3), kp_dist(4)] if d is not None]
 
+            # Check if bounding boxes overlap/nearly touch (suggests one person split)
+            boxes_overlapping = False
+            x1_min, y1_min, x1_max, y1_max = box_i
+            x2_min, y2_min, x2_max, y2_max = box_j
+            # Check X-axis overlap: if gaps between boxes is small relative to box width
+            x_gap = max(0, max(x1_min, x2_min) - min(x1_max, x2_max))
+            y_gap = max(0, max(y1_min, y2_min) - min(y1_max, y2_max))
+            box_width = (box_i[2] - box_i[0] + box_j[2] - box_j[0]) / 2
+            if x_gap < box_width * 0.25 and y_gap < scale * 0.5:  # Boxes nearly touch
+                boxes_overlapping = True
+
+            # Check if hips are vertically aligned (same person, split horizontally)
+            hips_vertically_aligned = False
+            hips_horizontally_separated = False
+            if conf_i[11] > 0.35 and conf_j[11] > 0.35:  # L_hip
+                hip_y_diff = abs(xy_i[11][1] - xy_j[11][1]) / scale
+                hip_x_diff = abs(xy_i[11][0] - xy_j[11][0]) / scale
+                if hip_y_diff < T_vertical_overlap:
+                    hips_vertically_aligned = True
+                    if hip_x_diff > 0.10 and boxes_overlapping:  # Only flag if boxes also overlap
+                        hips_horizontally_separated = True
+            if conf_i[12] > 0.35 and conf_j[12] > 0.35:  # R_hip
+                hip_y_diff = abs(xy_i[12][1] - xy_j[12][1]) / scale
+                hip_x_diff = abs(xy_i[12][0] - xy_j[12][0]) / scale
+                if hip_y_diff < T_vertical_overlap:
+                    hips_vertically_aligned = True
+                    if hip_x_diff > 0.10 and boxes_overlapping:
+                        hips_horizontally_separated = True
+
             # Assess sharing lower body
             shares_lower = False
-            if hips and sum(hips)/len(hips) < T_close:
+            if hips_vertically_aligned and boxes_overlapping:  # Same person, split horizontally
+                shares_lower = True
+            elif hips and sum(hips)/len(hips) < T_close:
                 shares_lower = True
             elif knees and sum(knees)/len(knees) < T_close:
                 shares_lower = True
@@ -214,14 +280,17 @@ def _check_pose_anomalies(keypoints_list: List[Dict[str, Any]], boxes_list: List
             elif hips and min(hips) < 0.06:
                 shares_lower = True
 
-            # Assess shoulder & head separation
+            # Assess shoulder & head separation (only meaningful if hips NOT aligned)
             shoulders_separated = len(shoulders) > 0 and sum(shoulders)/len(shoulders) > T_far
             head_separated = len(head_pts) > 0 and sum(head_pts)/len(head_pts) > T_far
 
             # Assess shoulder & head closeness
             shoulders_close = len(shoulders) > 0 and sum(shoulders)/len(shoulders) < T_close
 
-            if shares_lower:
+            # Flag if hips vertically aligned (same person) but split horizontally
+            if shares_lower and hips_horizontally_separated:
+                issues.append("duplicate torso: hips vertically aligned but horizontally separated (split person)")
+            elif shares_lower:
                 if shoulders_separated:
                     issues.append("duplicate torso: sharing a lower body but having separated torsos")
                 elif head_separated and shoulders_close:
@@ -372,7 +441,7 @@ class QCSettings:
         # Feature toggles
         use_yolo: bool = True,
         use_deep_scan: bool = True,   # moondream2
-        deep_scan_persons_only: bool = False,
+        deep_scan_persons_only: bool = True,
         strict_offline: bool = False,
         # Deep-scan strictness
         # "strict"  → any structure note = fail

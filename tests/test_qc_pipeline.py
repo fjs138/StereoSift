@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 
 from qc_pipeline import QCSettings, _route_image, collect_images, run_qc
 
@@ -64,6 +65,65 @@ class TestQCPipeline(unittest.TestCase):
 
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(new))
+
+
+class TestBenchmarkStructureDetection(unittest.TestCase):
+    def test_benchmark_against_ground_truth(self):
+        """Run QC pipeline on benchmark images and verify against ground truth labels."""
+        input_dir = Path(__file__).parent.parent / "input"
+        labels_file = input_dir / "benchmark_labels.json"
+
+        if not labels_file.exists():
+            self.skipTest(f"Benchmark labels not found at {labels_file}")
+
+        with open(labels_file) as f:
+            expected = json.load(f)
+
+        # Run QC on benchmark images
+        output_dir = input_dir / "qc_output"
+        results = run_qc(
+            str(input_dir),
+            str(output_dir),
+            settings=QCSettings(use_yolo=True, use_deep_scan=True),
+        )
+
+        # Map results by filename
+        actual = {r["filename"]: r["status"] for r in results}
+
+        # Check each expected image
+        mismatches = []
+        details = []
+        for filename, expected_status in expected.items():
+            if filename not in actual:
+                mismatches.append(f"Missing: {filename}")
+                continue
+
+            result = next((r for r in results if r["filename"] == filename), None)
+            actual_status = actual[filename]
+            # Convert status: "pass"/"fail" match directly, "warning" counts as a detection
+            if expected_status == "fail" and actual_status != "fail":
+                mismatches.append(
+                    f"{filename}: expected fail, got {actual_status}"
+                )
+                details.append(
+                    f"\n  {filename}:\n"
+                    f"    Status: {actual_status}\n"
+                    f"    Issues: {result['issues'] if result else 'N/A'}\n"
+                    f"    Structure note: {result['structure_note'] if result else 'N/A'}"
+                )
+            elif expected_status == "pass" and actual_status == "fail":
+                mismatches.append(
+                    f"{filename}: expected pass, got fail"
+                )
+
+        # Clean up output
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+        if mismatches:
+            details_str = "".join(details)
+            self.fail(
+                f"Structure detection mismatches:\n" + "\n".join(mismatches) + details_str
+            )
 
 
 if __name__ == "__main__":
