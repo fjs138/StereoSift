@@ -43,11 +43,20 @@ def _resolve_img_model(size_label: str, device_type: str) -> str:
 
 # ── shared helpers ────────────────────────────────────────────────────────────
 
-def _browse_file(var: ctk.StringVar, parent) -> None:
-    """Open exactly one file chooser."""
+def _browse_file(
+    var: ctk.StringVar,
+    parent,
+    output_var_to_update: ctk.StringVar | None = None,
+) -> None:
+    """Open one file chooser and optionally suggest a sibling output folder."""
     path = filedialog.askopenfilename(parent=parent)
     if path:
         var.set(path)
+        if output_var_to_update and not output_var_to_update.get():
+            stem = os.path.splitext(os.path.basename(path))[0]
+            output_var_to_update.set(
+                os.path.join(os.path.dirname(path), f"{stem}-judged")
+            )
 
 
 def _browse_folder(var: ctk.StringVar, parent, output_var_to_update: ctk.StringVar | None = None) -> None:
@@ -456,15 +465,19 @@ class JudgeTab(ctk.CTkFrame):
         paths.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
         paths.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(paths, text="Input folder", anchor="w").grid(
+        ctk.CTkLabel(paths, text="Input (file or folder)", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
         self._input_var = ctk.StringVar()
         self._output_var = ctk.StringVar()
         ctk.CTkEntry(paths, textvariable=self._input_var).grid(
             row=0, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="Browse", width=80,
+        ctk.CTkButton(paths, text="File…", width=65,
+                      command=lambda: _browse_file(
+                          self._input_var, self, self._output_var
+                      )).grid(row=0, column=2, padx=(6, 3), pady=5)
+        ctk.CTkButton(paths, text="Folder…", width=70,
                       command=lambda: _browse_folder(self._input_var, self, self._output_var)).grid(
-            row=0, column=2, padx=(6, 8), pady=5)
+            row=0, column=3, padx=(3, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
@@ -472,7 +485,7 @@ class JudgeTab(ctk.CTkFrame):
             row=1, column=1, sticky="ew", pady=5)
         ctk.CTkButton(paths, text="Browse", width=80,
                       command=lambda: _browse_folder(self._output_var, self)).grid(
-            row=1, column=2, padx=(6, 8), pady=5)
+            row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
 
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
@@ -507,7 +520,7 @@ class JudgeTab(ctk.CTkFrame):
         self._strict_offline_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             opts,
-            text="Strict offline mode (pixel-only; no backend, YOLO, or downloads)",
+            text="Offline mode — brightness and contrast only (no models or downloads)",
             variable=self._strict_offline_var,
             text_color="#c7d2fe",
         ).grid(row=2, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
@@ -651,7 +664,7 @@ class JudgeTab(ctk.CTkFrame):
         inp = self._input_var.get().strip()
         if not inp:
             messagebox.showwarning("Missing input",
-                                   "Please select an input folder.")
+                                   "Please select an input file or folder.")
             return
         if not self._output_var.get().strip():
             messagebox.showwarning("Missing output", "Please select an output folder.")
@@ -712,12 +725,12 @@ class JudgeTab(ctk.CTkFrame):
 
             use_backend = bool(opts["backend_url"]) and not opts["strict_offline"]
             if opts["strict_offline"]:
-                q.put(("log", "Strict offline mode enabled — pixel-only QC, no network use"))
+                q.put(("log", "Offline mode — brightness and contrast checks only"))
             if use_backend:
                 q.put(("log", "Using remote backend"))
             else:
                 if opts["strict_offline"]:
-                    label = "pixel-only checks"
+                    label = "brightness and contrast checks only"
                 else:
                     label = "structure scan enabled" if opts["deep_scan"] else "basic checks + YOLO"
                 q.put(("log", f"Local inference — {label}"))

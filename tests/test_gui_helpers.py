@@ -25,6 +25,17 @@ class TestGuiBrowseHelpers(unittest.TestCase):
         askopenfilename.assert_called_once()
         self.assertEqual(input_var.get(), "/pictures/photo.jpg")
 
+    @patch("gui.filedialog.askopenfilename", return_value="/pictures/photo.jpg")
+    def test_judge_file_browse_suggests_output(self, askopenfilename):
+        input_var = FakeVar()
+        output_var = FakeVar()
+
+        _browse_file(input_var, object(), output_var)
+
+        askopenfilename.assert_called_once()
+        self.assertEqual(input_var.get(), "/pictures/photo.jpg")
+        self.assertEqual(output_var.get(), "/pictures/photo-judged")
+
     @patch("gui.filedialog.askdirectory", return_value="/pictures/to-review")
     def test_judge_browse_opens_one_folder_dialog_and_suggests_output(self, askdirectory):
         input_var = FakeVar()
