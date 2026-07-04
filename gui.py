@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """StereoSift — CustomTkinter GUI.
 
-Two tabs:
+Three tabs:
   • Convert  — 2D images / videos → SBS 3D
+  • Upscale  — images → Quest-ready high resolution
   • Judge    — local YOLO QC: pass / warning / fail sorting
 
 All heavy work runs in a background thread so the UI stays responsive.
@@ -441,6 +442,150 @@ class ConvertTab(ctk.CTkFrame):
         self.after(100, self._poll)
 
 
+# ── Upscale tab ───────────────────────────────────────────────────────────────
+
+class UpscaleTab(ctk.CTkFrame):
+    """Real-ESRGAN x2plus batch upscaling with a VR-safe target preset."""
+
+    TARGETS = {
+        "Quest 3 SBS (2064×2208 per eye)": (2064, 2208),
+        "True 8K source (7680 px)": 7680,
+    }
+
+    def __init__(self, master, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._q: queue.Queue = queue.Queue()
+        self._running = False
+        self._build()
+        self._poll()
+
+    def _build(self):
+        paths = ctk.CTkFrame(self)
+        paths.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        paths.grid_columnconfigure(1, weight=1)
+        self._input_var = ctk.StringVar()
+        self._output_var = ctk.StringVar(value=os.path.join(os.getcwd(), "output", "upscaled"))
+        ctk.CTkLabel(paths, text="Input (image or folder)", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(8, 6), pady=5)
+        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
+            row=0, column=1, sticky="ew", pady=5)
+        ctk.CTkButton(paths, text="File…", width=65,
+                      command=lambda: _browse_file(self._input_var, self)).grid(
+            row=0, column=2, padx=(6, 3), pady=5)
+        ctk.CTkButton(paths, text="Folder…", width=70,
+                      command=lambda: _browse_folder(self._input_var, self)).grid(
+            row=0, column=3, padx=(3, 8), pady=5)
+        ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(8, 6), pady=5)
+        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
+            row=1, column=1, sticky="ew", pady=5)
+        ctk.CTkButton(paths, text="Browse", width=80,
+                      command=lambda: _browse_folder(self._output_var, self)).grid(
+            row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+
+        opts = ctk.CTkFrame(self)
+        opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        for col in range(3):
+            opts.grid_columnconfigure(col, weight=1)
+        ctk.CTkLabel(opts, text="Target").grid(row=0, column=0, padx=8, pady=(8, 2))
+        ctk.CTkLabel(opts, text="Tile size").grid(row=0, column=1, padx=8, pady=(8, 2))
+        ctk.CTkLabel(opts, text="Format").grid(row=0, column=2, padx=8, pady=(8, 2))
+        self._target_var = ctk.StringVar(value="Quest 3 SBS (2064×2208 per eye)")
+        ctk.CTkOptionMenu(opts, variable=self._target_var,
+                          values=list(self.TARGETS)).grid(
+            row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
+        self._tile_var = ctk.StringVar(value="256")
+        ctk.CTkOptionMenu(opts, variable=self._tile_var,
+                          values=["128", "256", "384", "512"]).grid(
+            row=1, column=1, padx=8, pady=(0, 8), sticky="ew")
+        self._format_var = ctk.StringVar(value="PNG")
+        ctk.CTkOptionMenu(opts, variable=self._format_var,
+                          values=["PNG", "JPEG"]).grid(
+            row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
+        ctk.CTkLabel(
+            opts,
+            text=("Default fits each eye within the Quest 3 panel's 2064×2208 bounds, "
+                  "producing SBS up to 4128×2208 without stretching or cropping."),
+            text_color="#aaa", wraplength=760, justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
+
+        self._log = LogPanel(self)
+        self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
+        buttons.grid_columnconfigure((0, 1), weight=1)
+        self._run_btn = ctk.CTkButton(buttons, text="Upscale", height=38,
+                                      command=self._run)
+        self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkButton(buttons, text="Open output folder", height=38,
+                      fg_color="#444", hover_color="#555",
+                      command=lambda: _open_folder(self._output_var.get().strip())).grid(
+            row=0, column=1, padx=(4, 0), sticky="ew")
+
+    def _run(self):
+        if self._running:
+            return
+        inp, out = self._input_var.get().strip(), self._output_var.get().strip()
+        if not inp or not out:
+            messagebox.showwarning("Missing path", "Please select input and output paths.")
+            return
+        self._running = True
+        self._run_btn.configure(state="disabled", text="Upscaling…")
+        self._log.clear()
+        self._log.start_spin()
+        opts = (inp, out, self.TARGETS[self._target_var.get()],
+                int(self._tile_var.get()), self._format_var.get())
+        threading.Thread(target=self._worker, args=opts, daemon=True).start()
+
+    def _worker(self, inp, out, target, tile, output_format):
+        try:
+            from upscaler import collect_images, ensure_model, RealESRGANx2, upscale_file
+            files = collect_images(inp)
+            if not files:
+                raise ValueError(f"No supported images found in {inp}")
+            log = lambda text: self._q.put(("log", text))
+            model_path = ensure_model(log=log)
+            log(f"Loading Real-ESRGAN x2plus (tile {tile})…")
+            engine = RealESRGANx2(model_path, tile=tile)
+            log(f"Found {len(files)} image(s); device: {engine.device}")
+            for index, path in enumerate(files):
+                self._q.put(("progress", index, len(files)))
+                log(f"[{index + 1}/{len(files)}] {os.path.basename(path)}")
+                target_box = target if isinstance(target, tuple) else None
+                long_edge = target if isinstance(target, int) else max(target)
+                upscale_file(path, out, engine, long_edge, output_format, log,
+                             target_box=target_box)
+                self._q.put(("progress", index + 1, len(files)))
+            self._q.put(("done", f"Finished — {len(files)} image(s) upscaled."))
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            self._q.put(("log", tb))
+            self._q.put(("error", tb.splitlines()[-1]))
+
+    def _poll(self):
+        try:
+            while True:
+                msg = self._q.get_nowait()
+                if msg[0] == "log":
+                    self._log.log(msg[1])
+                elif msg[0] == "progress":
+                    self._log.set_progress(msg[1], msg[2])
+                elif msg[0] in ("done", "error"):
+                    self._log.stop()
+                    if msg[0] == "done":
+                        self._log.log(msg[1])
+                    else:
+                        messagebox.showerror("Upscale error", msg[1])
+                    self._run_btn.configure(state="normal", text="Upscale")
+                    self._running = False
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+
 # ── Judge tab ─────────────────────────────────────────────────────────────────
 
 class JudgeTab(ctk.CTkFrame):
@@ -846,7 +991,7 @@ class App(ctk.CTk):
             text_color="#7eb3ff",
         ).pack(side="left", padx=16, pady=10)
         ctk.CTkLabel(
-            hdr, text="2D → SBS 3D  ·  Image QC",
+            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC",
             text_color="#666",
         ).pack(side="left", pady=10)
 
@@ -854,7 +999,8 @@ class App(ctk.CTk):
         tabs = ctk.CTkTabview(self)
         tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
 
-        for name, cls in [("Convert", ConvertTab), ("Judge", JudgeTab)]:
+        for name, cls in [("Convert", ConvertTab), ("Upscale", UpscaleTab),
+                          ("Judge", JudgeTab)]:
             tabs.add(name)
             tabs.tab(name).grid_columnconfigure(0, weight=1)
             tabs.tab(name).grid_rowconfigure(0, weight=1)

@@ -1,5 +1,5 @@
 # StereoSift
-StereoSift is a local desktop toolkit for 2D-to-3D conversion and image QC.
+StereoSift is a local desktop toolkit for 2D-to-3D conversion, AI upscaling, and image QC.
 
 ## Deployment
 
@@ -21,6 +21,7 @@ of manual clicking.
 | CustomTkinter | Desktop UI | GUI for the Convert and Judge tabs |
 | Depth Anything V2 | Image depth | Converts 2D images into SBS 3D |
 | Video Depth Anything | Video depth | Converts videos frame by frame with temporal consistency |
+| Real-ESRGAN x2plus | Image upscaling | Restores detail in tiled x2 passes before an exact target resize |
 | YOLO11n | QC pose gate | Finds people and catches obvious duplicate structure in the QC flow |
 | Moondream2 | QC fallback scan | Checks tricky structure cases when the pose rules are not enough |
 | LM Studio / oMLX | Optional backend | Local vision backend for stronger QC when you want it |
@@ -45,9 +46,10 @@ of manual clicking.
 
 ## How It Works
 
-StereoSift has two main paths.
+StereoSift has three main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
+Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
 Judge uses pixel checks first, then YOLO for person/object detection, and then
 an structure scan when that path is enabled.
 
@@ -80,9 +82,30 @@ The app is working, but a few edges are still being tuned:
 * QC verdicts are being tightened so obvious structure problems do not slip by
 * the optional backend can require an API key, so the GUI needs to make that obvious
 * strict offline mode is in place for peace of mind when you do not want any outbound behavior
+* the new upscaling tab is in place, using Real-ESRGAN x2plus with a Quest 3 preset
+* image upscaling is now a first-class step before SBS conversion when you want cleaner stereo output
 
 That’s basically where it is right now: useful, local-first, and still getting
 cleaned up around QC behavior and model choices.
+
+## Progress Journal
+
+This is the short “what we tried, what stuck, and what did not” log so the
+project history stays visible without digging through code.
+
+| Try | Result | Decision |
+| :-- | :-- | :-- |
+| Depth Anything V2 for image conversion | Works well for stills and keeps the SBS path simple | Kept |
+| Video Depth Anything for video conversion | Better fit for temporal consistency than frame-by-frame image depth | Kept |
+| YOLO11n as the first QC gate | Catches cheap, obvious person-count and structure issues | Kept, but not treated as a full judge |
+| Moondream2 as the fallback scan | Helps with trickier structure cases when YOLO is not enough | Kept as the second-pass check |
+| Qwen3-VL as an structure judge | Useful for isolated benchmarking, but not stable enough to become the production router | Left experimental |
+| Strict offline mode | Keeps the QC path fully local when you want zero outbound behavior | Kept as a guardrail |
+| Real-ESRGAN x2plus for Quest prep | Gives cleaner pre-SBS upscaling for Quest-oriented images | Kept and exposed as the new Upscale tab |
+
+The main pattern is pretty simple: YOLO is the cheap first pass, Moondream is
+the harder fallback, Qwen stays a benchmark tool for now, and Real-ESRGAN is the
+image-prep step when you want to feed SBS cleaner source material.
 
 ## Installation
 
@@ -106,10 +129,13 @@ or use `--strict-offline` on the CLI.
 python gui.py
 ```
 
-Two tabs:
+Three tabs:
 
 * Convert turns 2D images or videos into SBS 3D. Pick a model size, choose the
   output style, and run it.
+* Upscale runs tiled Real-ESRGAN x2plus on one image or a folder. Its default
+  Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
+  4128×2208; a true 7680 px source option is also available.
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
   person counts, issues, and structure notes when the structure scan is on.
 * Judge also has a strict offline toggle that keeps everything local and blocks
@@ -131,6 +157,17 @@ python convert.py --input movie.mp4 --output-dir output --video-encoder vits --y
 
 # Interactive launcher
 sh sbs.sh
+```
+
+## Image Upscaling
+
+The x2plus checkpoint downloads to `models/` on first use. Aspect ratio is
+preserved, images already at the target are not enlarged, and tiled inference
+keeps memory use manageable.
+
+```bash
+python upscaler.py --input photo.jpg --quest-3-sbs --output-dir output/upscaled
+python upscaler.py --input ~/Pictures/batch --long-edge 7680 --output-dir output/8k
 ```
 
 Video encoder choices: `vits` is fast, `vitb` is balanced, and `vitl` is the
@@ -181,6 +218,24 @@ unless you are in strict offline mode.
 
 Strict offline mode disables those model-backed checks entirely, so the QC path
 stays local to image decoding and pixel heuristics only.
+
+### Experimental Qwen Benchmark
+
+`qwen_structure.py` is an isolated Qwen3-VL structure judge for model evaluation;
+it is not part of the production routing policy. Once the default
+`Qwen/Qwen3-VL-4B-Instruct` checkpoint is present in the Hugging Face cache,
+benchmark a labeled folder fully offline with:
+
+```bash
+python tools/benchmark_structure.py \
+  --input path/to/images \
+  --labels path/to/labels.json \
+  --output output/qwen-benchmark.json
+```
+
+The label file is a JSON object mapping each filename to `pass` or `fail`.
+The report includes latency, errors, accuracy, and fail precision/recall so a
+model that misses defects is not hidden behind headline accuracy.
 
 ### Optional Backend
 
