@@ -482,7 +482,7 @@ class JudgeTab(ctk.CTkFrame):
         # Info label
         ctk.CTkLabel(
             opts,
-            text="YOLO detects persons/objects (~6 MB). moondream2 deep scan catches structure defects (~2 GB).",
+            text="YOLO pose catches obvious duplicate heads/torsos. moondream2 is a fallback (~2 GB).",
             text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
 
@@ -499,14 +499,22 @@ class JudgeTab(ctk.CTkFrame):
         self._deep_scan_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             opts,
-            text="Deep scan (moondream2) — major duplicated/fused figures only",
+            text="Pose structure scan + moondream2 fallback — major duplicated/fused figures only",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
 
+        self._strict_offline_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            opts,
+            text="Strict offline mode (pixel-only; no backend, YOLO, or downloads)",
+            variable=self._strict_offline_var,
+            text_color="#c7d2fe",
+        ).grid(row=2, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+
         # ── optional backend ──────────────────────────────────────────────────
         adv_toggle = ctk.CTkButton(
-            opts, text="▶  Remote backend (replaces moondream2)",
+            opts, text="▶  Local/remote vision backend (replaces moondream2)",
             fg_color="transparent", hover_color="#333",
             anchor="w", font=ctk.CTkFont(size=11),
             command=self._toggle_advanced,
@@ -522,17 +530,25 @@ class JudgeTab(ctk.CTkFrame):
         self._backend_var = ctk.StringVar()
         ctk.CTkEntry(
             self._adv_frame, textvariable=self._backend_var,
-            placeholder_text="http://127.0.0.1:1234/v1/chat/completions",
+            placeholder_text="LM Studio: http://127.0.0.1:1234/v1",
         ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
         self._adv_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self._adv_frame, text="Model name", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=4)
         self._backend_model_var = ctk.StringVar(
-            value="llama-3.2-11b-vision-instruct")
+            value="Qwen3.6-35B-A3B-MLX-4bit")
         ctk.CTkEntry(self._adv_frame,
                      textvariable=self._backend_model_var).grid(
-            row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+            row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
+
+        ctk.CTkLabel(self._adv_frame, text="API key", anchor="w").grid(
+            row=2, column=0, sticky="w", padx=(8, 6), pady=4)
+        self._backend_api_key_var = ctk.StringVar()
+        ctk.CTkEntry(
+            self._adv_frame, textvariable=self._backend_api_key_var,
+            placeholder_text="Optional oMLX/LM Studio Bearer token", show="•",
+        ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 8))
 
         self._adv_visible = False
 
@@ -668,8 +684,10 @@ class JudgeTab(ctk.CTkFrame):
             output_dir=self._output_var.get().strip(),
             backend_url=self._backend_var.get().strip() or None,
             model_name=self._backend_model_var.get().strip(),
+            api_key=self._backend_api_key_var.get().strip() or None,
             move_files=self._move_var.get(),
             deep_scan=self._deep_scan_var.get(),
+            strict_offline=self._strict_offline_var.get(),
         )
         threading.Thread(target=self._worker, args=(opts, self._stop_event,), daemon=True).start()
 
@@ -692,16 +710,22 @@ class JudgeTab(ctk.CTkFrame):
                        f"No images found in {opts['input_path']}"))
                 return
 
-            use_backend = bool(opts["backend_url"])
+            use_backend = bool(opts["backend_url"]) and not opts["strict_offline"]
+            if opts["strict_offline"]:
+                q.put(("log", "Strict offline mode enabled — pixel-only QC, no network use"))
             if use_backend:
                 q.put(("log", "Using remote backend"))
             else:
-                label = "moondream2 deep scan enabled" if opts["deep_scan"] else "basic checks + YOLO"
+                if opts["strict_offline"]:
+                    label = "pixel-only checks"
+                else:
+                    label = "structure scan enabled" if opts["deep_scan"] else "basic checks + YOLO"
                 q.put(("log", f"Local inference — {label}"))
 
             settings = QCSettings(
-                use_yolo=True,
-                use_deep_scan=opts["deep_scan"],
+                use_yolo=not opts["strict_offline"],
+                use_deep_scan=opts["deep_scan"] and not opts["strict_offline"],
+                strict_offline=opts["strict_offline"],
             )
 
             q.put(("log", f"Found {len(images)} image(s)"))
@@ -719,6 +743,7 @@ class JudgeTab(ctk.CTkFrame):
                         path, opts["backend_url"], opts["output_dir"],
                         model_name=opts["model_name"],
                         move_files=opts["move_files"],
+                        api_key=opts["api_key"],
                     )
                 else:
                     r = classify_image(

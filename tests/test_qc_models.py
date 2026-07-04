@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from qc_pipeline import QCSettings, _run_moondream, classify_image
+from qc_pipeline import (
+    QCSettings, _chat_completions_url, _parse_structure_verdict, _run_moondream,
+    classify_image, classify_image_with_backend,
+)
 
 
 class TestQCModelDecisions(unittest.TestCase):
@@ -304,6 +307,64 @@ class TestQCModelDecisions(unittest.TestCase):
         result = _run_moondream(self.image_path)
         self.assertFalse(result["structure_ok"])
         self.assertEqual(result["verdict"], "uncertain")
+
+    def test_verdict_parser_uses_leading_token_not_words_in_explanation(self):
+        self.assertEqual(
+            _parse_structure_verdict("FAIL: this image does not pass QC"),
+            "fail",
+        )
+        self.assertEqual(
+            _parse_structure_verdict("PASS: no fail condition is visible"),
+            "pass",
+        )
+        self.assertEqual(
+            _parse_structure_verdict("The image probably passes"),
+            "uncertain",
+        )
+
+    @patch("qc_pipeline._run_moondream")
+    @patch("qc_pipeline._run_yolo_pose")
+    @patch("qc_pipeline._run_yolo")
+    def test_strict_offline_uses_pixel_only_checks(self, mock_yolo, mock_pose, mock_moondream):
+        result = classify_image(
+            self.image_path,
+            os.path.join(self.tmpdir, "out"),
+            settings=QCSettings(strict_offline=True),
+        )
+
+        mock_yolo.assert_not_called()
+        mock_pose.assert_not_called()
+        mock_moondream.assert_not_called()
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("Strict offline mode", " ".join(result["detector_notes"]))
+
+    def test_backend_url_accepts_base_or_full_endpoint(self):
+        endpoint = "http://127.0.0.1:8000/v1/chat/completions"
+        self.assertEqual(_chat_completions_url("http://127.0.0.1:8000"), endpoint)
+        self.assertEqual(_chat_completions_url("http://127.0.0.1:8000/v1"), endpoint)
+        self.assertEqual(_chat_completions_url(endpoint), endpoint)
+
+    @patch("qc_pipeline._http_post")
+    def test_backend_uses_openai_multimodal_message_format(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"status":"fail","score":0,"issues":["duplicate torso"]}'
+        )}}]}
+
+        result = classify_image_with_backend(
+            self.image_path, "http://127.0.0.1:8000/v1",
+            os.path.join(self.tmpdir, "out"), model_name="vision-model",
+            api_key="secret-token",
+        )
+
+        url, payload = mock_post.call_args.args[:2]
+        self.assertEqual(url, "http://127.0.0.1:8000/v1/chat/completions")
+        content = payload["messages"][1]["content"]
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertTrue(content[1]["image_url"]["url"].startswith(
+            "data:image/jpeg;base64,"))
+        self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(mock_post.call_args.kwargs["api_key"], "secret-token")
+        self.assertEqual(result["status"], "fail")
 
 
 if __name__ == "__main__":

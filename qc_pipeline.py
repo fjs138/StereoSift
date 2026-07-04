@@ -13,13 +13,10 @@ Two complementary local checks, both running through PyTorch with no server:
    YOLO pose produces one skeleton per person instance and cannot reliably
    flag two heads on one body.
 
-3. Moondream2 deep scan (optional, off by default)
-   ``vikhyatk/moondream2`` (~2 GB, cached by HuggingFace on first use)
-   A small vision-language model that looks at the whole image and reasons
-   about it holistically. Catches what YOLO cannot: fused figures, extra
-   limbs, doubled heads on one torso, malformed hands, visual glitches.
-   Only runs on images that contain people (per YOLO) or when
-   ``deep_scan_all=True``.
+3. Pose / structure scan (optional, off by default)
+   YOLO pose checks the people in the image for obvious duplicate torsos or
+   heads. If enabled, a local LLM scan can still act as a fallback for tricky
+   cases, but it is no longer the only structure judge.
 
 Optional fourth path: OpenAI-compatible vision backend (LM Studio, Ollama).
 Pass ``backend_url`` to replace the local moondream2 scan with an API call.
@@ -32,17 +29,14 @@ Output
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import shutil
-import tempfile
-import threading
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 try:
     import requests
@@ -239,8 +233,33 @@ def _check_pose_anomalies(keypoints_list: List[Dict[str, Any]], boxes_list: List
 
 
 # ---------------------------------------------------------------------------
-# Moondream2 deep scan
+# Structure scanning
 # ---------------------------------------------------------------------------
+
+def _run_structure_scan(image_path: str) -> Dict[str, Any]:
+    """Run pose detection and convert obvious duplicate structure into issues.
+
+    This is the primary structure gate. The local LLM scan is only used as a
+    fallback for ambiguous cases after this pass.
+    """
+    person_count = 0
+    detections: list[str] = []
+    issues: list[str] = []
+
+    yolo = _run_yolo(image_path)
+    person_count = yolo["person_count"]
+    detections = yolo["detections"]
+
+    pose_data = _run_yolo_pose(image_path)
+    pose_issues = _check_pose_anomalies(pose_data["keypoints"], pose_data["boxes"])
+    for issue in pose_issues:
+        issues.append(f"major structure defect: {issue}")
+
+    return {
+        "person_count": person_count,
+        "detections": detections,
+        "issues": issues,
+    }
 
 def _get_moondream():
     """Return the moondream2 model, downloading on first call (~2 GB)."""
@@ -289,16 +308,7 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     result = model.query(img, prompt)  # type: ignore
     answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
 
-    # Parse response using word-boundary matching to avoid false matches
-    answer_upper = answer.upper()
-    if re.search(r'\bPASS\b', answer_upper):
-        verdict = "pass"
-    elif re.search(r'\bFAIL\b', answer_upper):
-        verdict = "fail"
-    elif re.search(r'\bUNCERTAIN\b', answer_upper):
-        verdict = "uncertain"
-    else:
-        verdict = "uncertain"
+    verdict = _parse_structure_verdict(answer)
 
     return {
         "verdict": verdict,
@@ -306,6 +316,19 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
         "structure_note": answer,
         "raw": answer,
     }
+
+
+def _parse_structure_verdict(answer: str) -> str:
+    """Parse the required leading verdict without guessing from prose.
+
+    Checking for PASS anywhere before checking for FAIL made responses such as
+    ``FAIL: this does not pass`` become passes.  Requiring the verdict at the
+    start also prevents explanatory text from accidentally changing a result.
+    """
+    match = re.match(r"^\s*(PASS|FAIL|UNCERTAIN)\b", answer, re.IGNORECASE)
+    if not match:
+        return "uncertain"
+    return match.group(1).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +373,7 @@ class QCSettings:
         use_yolo: bool = True,
         use_deep_scan: bool = True,   # moondream2
         deep_scan_persons_only: bool = False,
+        strict_offline: bool = False,
         # Deep-scan strictness
         # "strict"  → any structure note = fail
         # "balanced"→ any structure note = warning, strong language = fail
@@ -367,6 +391,7 @@ class QCSettings:
         self.use_yolo                = use_yolo
         self.use_deep_scan           = use_deep_scan
         self.deep_scan_persons_only  = deep_scan_persons_only
+        self.strict_offline          = strict_offline
         self.deep_scan_strictness    = deep_scan_strictness
 
 
@@ -403,6 +428,7 @@ def classify_image(
     person_count = 0
     detections: list[str] = []
     structure_note = ""
+    detector_notes: list[str] = []
 
     # ── 1. Pixel checks ───────────────────────────────────────────────────────
     stats      = _pixel_stats(image_path)
@@ -412,28 +438,26 @@ def classify_image(
     # Exposure and contrast are recorded for diagnostics only. They do not
     # influence structural-structure judgment.
 
-    # ── 2. YOLO detection & Pose Checks ───────────────────────────────────────
-    if settings.use_yolo:
+    # ── 2. Pose structure gate ──────────────────────────────────────────────────
+    if settings.strict_offline:
+        detector_notes.append(
+            "Strict offline mode: pixel-only QC; YOLO pose and fallback scan disabled"
+        )
+    elif settings.use_yolo:
         try:
-            yolo = _run_yolo(image_path)
-            person_count = yolo["person_count"]
-            detections   = yolo["detections"]
-        except Exception:
-            pass
+            pose_scan = _run_structure_scan(image_path)
+            person_count = pose_scan["person_count"]
+            detections = pose_scan["detections"]
+            issues.extend(pose_scan["issues"])
+        except Exception as exc:
+            detector_notes.append(f"YOLO structure gate unavailable: {exc}")
 
-        try:
-            pose_data = _run_yolo_pose(image_path)
-            pose_issues = _check_pose_anomalies(pose_data["keypoints"], pose_data["boxes"])
-            if pose_issues:
-                for issue in pose_issues:
-                    issues.append(f"major structure defect: {issue}")
-        except Exception as e:
-            print(f"[YOLO pose error] {e}")
-
-    # ── 3. Moondream2 deep scan ───────────────────────────────────────────────
-    # Skip Moondream2 if a major structure defect has already been identified
+    # ── 3. Fallback structure scan ──────────────────────────────────────────────
+    # Only use the local LLM if the primary pose gate did not already find a
+    # clear structural defect.
     run_deep = (
-        settings.use_deep_scan
+        (not settings.strict_offline)
+        and settings.use_deep_scan
         and (not settings.deep_scan_persons_only or person_count > 0)
         and not any("major structure defect" in issue for issue in issues)
     )
@@ -476,6 +500,7 @@ def classify_image(
         "person_count": person_count,
         "detections":   detections,
         "structure_note": structure_note,
+        "detector_notes": detector_notes,
         "destination":  destination,
     }
 
@@ -484,71 +509,122 @@ def classify_image(
 # Optional: OpenAI-compatible vision backend
 # ---------------------------------------------------------------------------
 
-def _serve_image_url(image_path: str, max_side: int = 512) -> tuple:
+def _image_data_url(image_path: str, max_side: int = 1536) -> str:
+    """Return a standard inline image URL understood by LM Studio and oMLX."""
     if Image is None:
         raise RuntimeError("Pillow required")
-    tmp = tempfile.mkdtemp(prefix="qc_")
-    name = quote(os.path.basename(image_path))
-    out  = os.path.join(tmp, name)
+    from io import BytesIO
+
     with Image.open(image_path) as img:
         img = img.convert("RGB")
         img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-        img.save(out, format="JPEG", quality=85)
-    handler = partial(SimpleHTTPRequestHandler, directory=tmp)
-    server  = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://127.0.0.1:{server.server_address[1]}/{name}", tmp
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=92)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
 
 
-def _stop_server(server, tmp: str) -> None:
-    try:
-        server.shutdown()
-    finally:
-        server.server_close()
-    shutil.rmtree(tmp, ignore_errors=True)
+def _chat_completions_url(backend_url: str) -> str:
+    """Accept a server root, OpenAI base URL, or full chat endpoint."""
+    url = backend_url.strip().rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return f"{url}/v1/chat/completions"
 
 
-def _http_post(url: str, payload: dict, timeout: float = 120.0) -> dict:
-    if requests is not None:
-        r = requests.post(url, json=payload, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _post_with_requests(url, payload, headers, timeout, max_retries):
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            if attempt == max_retries:
+                raise RuntimeError(f"Backend unreachable: {exc}") from exc
+            time.sleep(min(2 ** attempt, 8))
+            continue
+        if r.ok:
+            return r.json()
+        detail = r.text.strip()[:500]
+        if r.status_code not in _RETRYABLE_STATUS or attempt == max_retries:
+            raise RuntimeError(f"Backend HTTP {r.status_code}: {detail or r.reason}")
+        time.sleep(min(2 ** attempt, 8))
+
+
+def _post_with_urllib(url, payload, headers, timeout, max_retries):
     import urllib.request, urllib.error
     data = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Backend {e.code}: {e.read().decode()}") from e
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if exc.code not in _RETRYABLE_STATUS or attempt == max_retries:
+                raise RuntimeError(f"Backend {exc.code}: {exc.read().decode()}") from exc
+        except urllib.error.URLError as exc:
+            if attempt == max_retries:
+                raise RuntimeError(f"Backend unreachable: {exc}") from exc
+        time.sleep(min(2 ** attempt, 8))
+
+
+def _http_post(
+    url: str,
+    payload: dict,
+    timeout: float = 120.0,
+    api_key: Optional[str] = None,
+    max_retries: int = 3,
+) -> dict:
+    """POST with retry/backoff for transient failures.
+
+    Retries connection errors, timeouts, and 429/5xx responses (exponential
+    backoff capped at 8s). Client errors (4xx besides 429) fail immediately
+    since retrying them won't help.
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if requests is not None:
+        return _post_with_requests(url, payload, headers, timeout, max_retries)
+    return _post_with_urllib(url, payload, headers, timeout, max_retries)
+
+
+_QC_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["pass", "warning", "fail"]},
+        "score": {"type": "number", "minimum": 0, "maximum": 100},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["status", "score", "issues"],
+    "additionalProperties": False,
+}
 
 
 def _parse_llm_response(text: str) -> Dict[str, Any]:
-    """Extract status/score/issues from free-form LLM text."""
+    """Parse the structured QC verdict enforced via response_format.
+
+    The request constrains the backend to this JSON schema, so content should
+    be pure JSON. Some backends still wrap it in prose or code fences, so fall
+    back to extracting the outermost {...} block before giving up — no
+    keyword-guessing from prose, since that misreads phrasing like
+    "does not fail" as a fail.
+    """
     t = text.strip()
-    # Try embedded JSON first.
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        pass
     s, e = t.find("{"), t.rfind("}")
     if s >= 0 and e > s:
         try:
-            return json.loads(t[s:e+1])
+            return json.loads(t[s:e + 1])
         except json.JSONDecodeError:
             pass
-    lower = t.lower()
-    status = (
-        "fail"    if re.search(r"\b(fail|reject|unacceptable)\b", lower)
-                     and not re.search(r"\bnot\s+fail\b", lower)
-        else "warning" if re.search(r"\b(warning|minor|some issues)\b", lower)
-        else "pass"    if re.search(r"\b(pass|good|acceptable|fine|ok)\b", lower)
-        else "warning"
-    )
-    issues = [label for kw, label in [
-        ("duplicate", "duplicate structure"), ("extra head", "extra head"),
-        ("fused", "fused figures"), ("blur", "blurry"),
-        ("dark", "dark"), ("bright", "bright"),
-        ("artifact", "artifact"), ("noise", "noise"),
-    ] if kw in lower]
-    return {"status": status, "score": None, "issues": issues}
+    raise ValueError(f"Backend response was not valid JSON: {t[:200]!r}")
 
 
 def classify_image_with_backend(
@@ -558,33 +634,51 @@ def classify_image_with_backend(
     timeout: float = 120.0,
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Classify one image via an OpenAI-compatible vision backend."""
-    server, img_url, tmp = _serve_image_url(image_path)
-    try:
-        prompt = (
-            "Inspect this image carefully for quality issues. "
-            "Look for: duplicated/fused figures, extra or missing limbs, "
-            "malformed hands, exposure problems, blur, and noise. "
-            "Reply with a JSON object: {status, score, issues}. "
-            "status: pass/warning/fail. score: 0-100. issues: list of strings."
-        )
-        raw = _http_post(backend_url, {
-            "model": model_name, "temperature": 0.1,
-            "image_url": img_url,
-            "messages": [
-                {"role": "system", "content": "You are an image QC assistant."},
-                {"role": "user",   "content": prompt},
-            ],
-        }, timeout=timeout)
-    finally:
-        _stop_server(server, tmp)
+    img_url = _image_data_url(image_path)
+    prompt = (
+        "Inspect the human body structure in this image, counting each visible head, "
+        "torso, arm, leg, and complete person before deciding. FAIL only for a "
+        "clear major structural defect: duplicate heads, two torsos joined to one "
+        "lower body, extra limbs, or visibly fused bodies. PASS normal separate "
+        "people and do not penalize cropping, occlusion, pose, hands, clothing, "
+        "lighting, blur, or artistic style. If genuinely ambiguous use WARNING. "
+        "Return only JSON: {\"status\":\"pass|warning|fail\","
+        "\"score\":0-100,\"issues\":[\"brief evidence\"]}."
+    )
+    raw = _http_post(_chat_completions_url(backend_url), {
+        "model": model_name,
+        "temperature": 0,
+        "max_tokens": 250,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "qc_verdict", "strict": True, "schema": _QC_RESPONSE_SCHEMA},
+        },
+        "messages": [
+            {"role": "system", "content": (
+                "You are a conservative image QC judge. Base the verdict only "
+                "on structure actually visible in the supplied image."
+            )},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": img_url, "detail": "high"
+                }},
+            ]},
+        ],
+    }, timeout=timeout, api_key=api_key)
 
     choices = raw.get("choices") or []
     text = ""
     if choices:
         msg  = choices[0].get("message") or {}
         text = msg.get("content") or choices[0].get("text") or ""
+        if isinstance(text, list):
+            text = "".join(
+                item.get("text", "") for item in text if isinstance(item, dict)
+            )
     if not text:
         raise ValueError("Backend returned no content")
 
@@ -627,7 +721,15 @@ def collect_images(input_path: str) -> List[str]:
 
 def _route_image(image_path: str, output_dir: str,
                  status: str, move_files: bool) -> str:
-    dest = os.path.join(output_dir, status, os.path.basename(image_path))
+    # A rerun may produce a different verdict. Remove stale copies so one image
+    # can never appear in both pass and fail (or warning) at the same time.
+    filename = os.path.basename(image_path)
+    source = os.path.abspath(image_path)
+    for folder in ("pass", "warning", "fail"):
+        old = os.path.abspath(os.path.join(output_dir, folder, filename))
+        if old != source and os.path.isfile(old):
+            os.unlink(old)
+    dest = os.path.join(output_dir, status, filename)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     (shutil.move if move_files else shutil.copy2)(image_path, dest)
     return dest
@@ -644,6 +746,7 @@ def run_qc(
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
     settings: QCSettings | None = None,
+    api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run QC on all images in ``input_path``, write report.json."""
     if settings is None:
@@ -654,10 +757,11 @@ def run_qc(
 
     results = []
     for image_path in images:
-        if backend_url:
+        if backend_url and not settings.strict_offline:
             r = classify_image_with_backend(
                 image_path, backend_url, output_dir,
-                model_name=model_name, move_files=move_files)
+                model_name=model_name, move_files=move_files,
+                api_key=api_key)
         else:
             r = classify_image(image_path, output_dir,
                                move_files=move_files, settings=settings)
@@ -688,6 +792,8 @@ def main() -> None:
     p.add_argument("--input",        required=True)
     p.add_argument("--output-dir",   default="output/qc")
     p.add_argument("--backend-url",  default=None)
+    p.add_argument("--api-key", default=None,
+                   help="Optional Bearer token for the vision backend")
     p.add_argument("--model",        default="llama-3.2-11b-vision-instruct")
     p.add_argument("--deep-scan", dest="deep_scan", action="store_true", default=True,
                    help="Enable moondream2 structure scan (default)")
@@ -695,21 +801,25 @@ def main() -> None:
                    help="Disable moondream2 and run detection metadata only")
     p.add_argument("--strictness",   default="balanced",
                    choices=["relaxed", "balanced", "strict"])
+    p.add_argument("--strict-offline", action="store_true",
+                   help="Disable backend, YOLO, and model downloads; run pixel-only QC")
     p.add_argument("--no-yolo",      action="store_true")
     p.add_argument("--move",         action="store_true")
     args = p.parse_args()
 
     settings = QCSettings(
-        use_yolo=not args.no_yolo,
-        use_deep_scan=args.deep_scan,
+        use_yolo=not args.no_yolo and not args.strict_offline,
+        use_deep_scan=args.deep_scan and not args.strict_offline,
         deep_scan_persons_only=False,
+        strict_offline=args.strict_offline,
         deep_scan_strictness=args.strictness,
     )
     run_qc(args.input, args.output_dir,
-           backend_url=args.backend_url,
+           backend_url=None if args.strict_offline else args.backend_url,
            model_name=args.model,
            move_files=args.move,
-           settings=settings)
+           settings=settings,
+           api_key=None if args.strict_offline else args.api_key)
 
 
 if __name__ == "__main__":
