@@ -539,7 +539,12 @@ def classify_image(
             if verdict == "fail":
                 issues.append(f"major structure defect: {structure_note}")
             elif verdict == "uncertain":
-                issues.append(f"uncertain structure: {structure_note}")
+                # Escalate uncertain verdicts about twins/duplicates to fail
+                note_lower = structure_note.lower()
+                if "twin" in note_lower or "duplicate" in note_lower or "similar" in note_lower:
+                    issues.append(f"major structure defect: {structure_note}")
+                else:
+                    issues.append(f"uncertain structure: {structure_note}")
         except Exception as exc:
             issues.append(f"deep scan skipped ({exc})")
 
