@@ -92,7 +92,6 @@ _SUSPECT_STRUCTURE_PATTERNS = (
     "shared torso",
 )
 
-
 # ---------------------------------------------------------------------------
 # Model caches (process-level singletons)
 # ---------------------------------------------------------------------------
@@ -447,6 +446,10 @@ def _append_human_readable_response(
     image_path: str,
     source: str,
     text: str,
+    final_status: Optional[str] = None,
+    final_score: Optional[float] = None,
+    final_issues: Optional[List[str]] = None,
+    final_field: str = "status",
 ) -> None:
     """Append a readable model response to a text log for later review."""
     if not output_dir:
@@ -457,6 +460,24 @@ def _append_human_readable_response(
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(f"[{stamp}] {os.path.basename(image_path)} | {source}\n")
         fh.write(text.rstrip() + "\n\n")
+        if final_status is not None:
+            fh.write(
+                f"Final verdict: {final_field}={final_status} score="
+                f"{final_score if final_score is not None else 'n/a'}\n"
+            )
+            if final_issues:
+                fh.write(f"Final issues: {' | '.join(final_issues)}\n")
+            fh.write("\n")
+
+
+def _reset_human_readable_log(output_dir: Optional[str]) -> None:
+    """Start a fresh per-run response log."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    with open(log_path, "w", encoding="utf-8") as fh:
+        fh.write("")
 
 
 def _is_strong_structure_defect(note: str) -> bool:
@@ -754,6 +775,17 @@ _QC_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+_LABEL_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 100},
+        "reason": {"type": "string"},
+    },
+    "required": ["label", "confidence", "reason"],
+    "additionalProperties": False,
+}
+
 
 def _parse_llm_response(text: str) -> Dict[str, Any]:
     """Parse the structured QC verdict enforced via response_format.
@@ -778,6 +810,25 @@ def _parse_llm_response(text: str) -> Dict[str, Any]:
     raise ValueError(f"Backend response was not valid JSON: {t[:200]!r}")
 
 
+def _normalize_choice_label(label: str, labels: List[str]) -> str:
+    candidate = re.sub(r"[\s_\-]+", "", str(label)).lower()
+    if not candidate and labels:
+        return labels[0]
+    for option in labels:
+        normalized = re.sub(r"[\s_\-]+", "", option).lower()
+        if candidate == normalized:
+            return option
+    for option in labels:
+        normalized = re.sub(r"[\s_\-]+", "", option).lower()
+        if candidate in normalized or normalized in candidate:
+            return option
+    return labels[0] if labels else str(label)
+
+
+def _looks_like_model_refusal(text: str) -> bool:
+    return "violation" in text.lower()
+
+
 def classify_image_with_backend(
     image_path: str,
     backend_url: str,
@@ -791,13 +842,13 @@ def classify_image_with_backend(
     img_url = _image_data_url(image_path)
     prompt = (
         "Review this image for human body structure issues.\n"
-        "Use FAIL for severe problems like heads in the wrong place, duplicate "
-        "heads, multiple torsos that look fused, limbs attached in impossible "
-        "ways, or people that appear merged together like twins sharing the same "
-        "body.\n"
+        "Use FAIL for severe problems like heads in the wrong place, "
+        "duplicate heads, multiple torsos that look fused, people merged into "
+        "one body, or limbs attached in impossible ways.\n"
         "Use WARNING for minor problems like small proportion issues, awkward "
         "poses, mild weirdness, or other hiccups that are not clearly severe.\n"
-        "Use PASS when no issues are detected, and do not be overly picky.\n"
+        "Use PASS when the body structure looks normal and no real issue is "
+        "detected, and do not be overly picky.\n"
         "Return only JSON: {\"status\":\"pass|warning|fail\","
         "\"score\":0-100,\"issues\":[\"brief evidence\"]}."
     )
@@ -811,8 +862,8 @@ def classify_image_with_backend(
         },
         "messages": [
             {"role": "system", "content": (
-                "You are an image review judge. Be practical and conservative "
-                "about only clearly severe structure issues."
+                "You are an image review judge. Be practical and fail only for "
+                "clearly severe structure issues."
             )},
             {"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -835,8 +886,6 @@ def classify_image_with_backend(
     if not text:
         raise ValueError("Backend returned no content")
 
-    _append_human_readable_response(output_dir, image_path, "backend", text)
-
     try:
         parsed = _parse_llm_response(text)
         status = parsed.get("status", "warning")
@@ -849,10 +898,31 @@ def classify_image_with_backend(
         score = 50.0
         issues = [f"backend response parse failed: {exc}"]
 
+    issue_text = " ".join(str(issue) for issue in issues)
+    route_folder = status
+    if _looks_like_model_refusal(f"{text} {issue_text}"):
+        route_folder = "unscored"
+
+    _append_human_readable_response(
+        output_dir,
+        image_path,
+        "backend",
+        text,
+        final_status=status,
+        final_score=round(score, 1),
+        final_issues=[str(issue) for issue in issues],
+    )
+
     os.makedirs(output_dir, exist_ok=True)
-    for folder in ("pass", "warning", "fail"):
+    for folder in ("pass", "warning", "fail", "unscored"):
         os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
-    destination = _route_image(image_path, output_dir, status, move_files)
+    destination = _route_image_to_folder(
+        image_path,
+        output_dir,
+        route_folder,
+        move_files,
+        sibling_folders=["pass", "warning", "fail", "unscored"],
+    )
 
     return {
         "filename":     os.path.basename(image_path),
@@ -860,7 +930,108 @@ def classify_image_with_backend(
         "score":        round(score, 1),
         "issues":       issues,
         "structure_note": text[:200],
+        "route_folder": route_folder,
         "destination":  destination,
+    }
+
+
+def classify_image_with_labels(
+    image_path: str,
+    backend_url: str,
+    labels: List[str],
+    output_dir: str,
+    timeout: float = 120.0,
+    model_name: str = "llama-3.2-11b-vision-instruct",
+    move_files: bool = False,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Classify one image into one of the provided labels via a vision backend."""
+    clean_labels = [str(label).strip() for label in labels if str(label).strip()]
+    if not clean_labels:
+        raise ValueError("At least one label is required")
+
+    img_url = _image_data_url(image_path)
+    label_list = "\n".join(f"- {label}" for label in clean_labels)
+    prompt = (
+        "Choose the single best label for this image from the allowed list.\n"
+        "Allowed labels:\n"
+        f"{label_list}\n\n"
+        "Pick exactly one label from the list. Use your best judgment if the "
+        "image is ambiguous. Do not invent new labels.\n"
+        "Return only JSON: {\"label\":\"one_allowed_label\","
+        "\"confidence\":0-100,\"reason\":\"brief reason\"}."
+    )
+    raw = _http_post(_chat_completions_url(backend_url), {
+        "model": model_name,
+        "temperature": 0,
+        "max_tokens": 250,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "label_choice", "strict": True, "schema": _LABEL_RESPONSE_SCHEMA},
+        },
+        "messages": [
+            {"role": "system", "content": (
+                "You are a careful image organizer. Choose only from the provided labels."
+            )},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": img_url, "detail": "high"
+                }},
+            ]},
+        ],
+    }, timeout=timeout, api_key=api_key)
+
+    choices = raw.get("choices") or []
+    text = ""
+    if choices:
+        msg = choices[0].get("message") or {}
+        text = msg.get("content") or choices[0].get("text") or ""
+        if isinstance(text, list):
+            text = "".join(
+                item.get("text", "") for item in text if isinstance(item, dict)
+            )
+    if not text:
+        raise ValueError("Backend returned no content")
+
+    try:
+        parsed = _parse_llm_response(text)
+        label = _normalize_choice_label(parsed.get("label", ""), clean_labels)
+        confidence = float(parsed.get("confidence") or 0.0)
+        reason = str(parsed.get("reason") or "").strip() or "No reason provided."
+    except Exception as exc:
+        label = clean_labels[0]
+        confidence = 0.0
+        reason = f"backend response parse failed: {exc}"
+
+    _append_human_readable_response(
+        output_dir,
+        image_path,
+        "organizer",
+        text,
+        final_status=label,
+        final_score=round(confidence, 1),
+        final_issues=[reason],
+        final_field="label",
+    )
+
+    destination = _route_image_to_folder(
+        image_path,
+        output_dir,
+        label,
+        move_files,
+        sibling_folders=clean_labels,
+    )
+
+    return {
+        "filename": os.path.basename(image_path),
+        "label": label,
+        "status": label,
+        "confidence": round(confidence, 1),
+        "reason": reason,
+        "organize_note": text[:200],
+        "destination": destination,
+        "labels": clean_labels,
     }
 
 
@@ -880,20 +1051,37 @@ def collect_images(input_path: str) -> List[str]:
     raise FileNotFoundError(f"Not found: {input_path}")
 
 
-def _route_image(image_path: str, output_dir: str,
-                 status: str, move_files: bool) -> str:
+def _route_image_to_folder(
+    image_path: str,
+    output_dir: str,
+    folder: str,
+    move_files: bool,
+    sibling_folders: Optional[List[str]] = None,
+) -> str:
     # A rerun may produce a different verdict. Remove stale copies so one image
     # can never appear in both pass and fail (or warning) at the same time.
     filename = os.path.basename(image_path)
     source = os.path.abspath(image_path)
-    for folder in ("pass", "warning", "fail"):
-        old = os.path.abspath(os.path.join(output_dir, folder, filename))
+    folders = sibling_folders or []
+    for sibling in folders:
+        old = os.path.abspath(os.path.join(output_dir, sibling, filename))
         if old != source and os.path.isfile(old):
             os.unlink(old)
-    dest = os.path.join(output_dir, status, filename)
+    dest = os.path.join(output_dir, folder, filename)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     (shutil.move if move_files else shutil.copy2)(image_path, dest)
     return dest
+
+
+def _route_image(image_path: str, output_dir: str,
+                 status: str, move_files: bool) -> str:
+    return _route_image_to_folder(
+        image_path,
+        output_dir,
+        status,
+        move_files,
+        sibling_folders=["pass", "warning", "fail"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +1100,7 @@ def run_qc(
     """Run QC on all images in ``input_path``, write report.json."""
     if settings is None:
         settings = _DEFAULT_SETTINGS
+    _reset_human_readable_log(output_dir)
     images = collect_images(input_path)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
@@ -938,6 +1127,49 @@ def run_qc(
     print(f"QC done — {len(results)} images | "
           f"pass {counts['pass']}  warning {counts['warning']}  "
           f"fail {counts['fail']}")
+    return results
+
+
+def run_organize(
+    input_path: str,
+    output_dir: str,
+    labels: List[str],
+    backend_url: str,
+    model_name: str = "llama-3.2-11b-vision-instruct",
+    move_files: bool = False,
+    api_key: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Run image organization and write report.json."""
+    clean_labels = [str(label).strip() for label in labels if str(label).strip()]
+    if not clean_labels:
+        raise ValueError("At least one label is required")
+
+    _reset_human_readable_log(output_dir)
+    images = collect_images(input_path)
+    if not images:
+        raise FileNotFoundError(f"No images found in: {input_path}")
+
+    results = []
+    for image_path in images:
+        r = classify_image_with_labels(
+            image_path,
+            backend_url,
+            clean_labels,
+            output_dir,
+            model_name=model_name,
+            move_files=move_files,
+            api_key=api_key,
+        )
+        results.append(r)
+
+    os.makedirs(output_dir, exist_ok=True)
+    for label in clean_labels:
+        os.makedirs(os.path.join(output_dir, label), exist_ok=True)
+    report = os.path.join(output_dir, "report.json")
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump(results, fh, indent=2)
+
+    print(f"Organize done — {len(results)} images | labels: {', '.join(clean_labels)}")
     return results
 
 

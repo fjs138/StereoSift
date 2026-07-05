@@ -429,7 +429,7 @@ class TestQCModelDecisions(unittest.TestCase):
         user_prompt = payload["messages"][1]["content"][0]["text"]
         self.assertIn("Use FAIL for severe problems", user_prompt)
         self.assertIn("Use WARNING for minor problems", user_prompt)
-        self.assertIn("Use PASS when no issues are detected", user_prompt)
+        self.assertIn("Use PASS when the body structure looks normal", user_prompt)
         self.assertNotIn("counting each visible head", user_prompt)
 
     @patch("qc_pipeline._http_post")
@@ -450,6 +450,40 @@ class TestQCModelDecisions(unittest.TestCase):
             log = handle.read()
         self.assertIn("backend", log)
         self.assertIn("cropped body", log)
+        self.assertIn("Final verdict: status=warning", log)
+
+    @patch("qc_pipeline._http_post")
+    def test_backend_uses_parsed_status_as_single_source_of_truth(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"status":"pass","score":95,"issues":["No fused bodies are visible."]}'
+        )}}]}
+
+        result = classify_image_with_backend(
+            self.image_path, "http://127.0.0.1:8000/v1",
+            os.path.join(self.tmpdir, "out"), model_name="vision-model",
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["score"], 95.0)
+
+    @patch("qc_pipeline._http_post")
+    def test_backend_routes_violation_language_to_violations_folder(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"status":"pass","score":95,"issues":["The image may be a violation of the stated policy."]}'
+        )}}]}
+
+        output_dir = os.path.join(self.tmpdir, "out")
+        result = classify_image_with_backend(
+            self.image_path,
+            "http://127.0.0.1:8000/v1",
+            output_dir,
+            model_name="vision-model",
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["route_folder"], "unscored")
+        self.assertTrue(result["destination"].startswith(os.path.join(output_dir, "unscored")))
+        self.assertTrue(os.path.exists(result["destination"]))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qc_pipeline import QCSettings, _route_image, collect_images, run_qc
+from qc_pipeline import QCSettings, _reset_human_readable_log, _route_image, collect_images, run_qc
 
 
 class TestQCPipeline(unittest.TestCase):
@@ -65,6 +65,18 @@ class TestQCPipeline(unittest.TestCase):
 
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(new))
+
+    def test_reset_human_readable_log_clears_previous_entries(self):
+        output_dir = os.path.join(self.tmpdir, "out")
+        os.makedirs(output_dir, exist_ok=True)
+        log_path = os.path.join(output_dir, "model_responses.log")
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("old entry")
+
+        _reset_human_readable_log(output_dir)
+
+        with open(log_path, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "")
 
 
 class TestBenchmarkStructureDetection(unittest.TestCase):

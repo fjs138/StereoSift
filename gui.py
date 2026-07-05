@@ -12,6 +12,7 @@ Progress and log output stream back to the main thread via a queue.
 
 from __future__ import annotations
 
+import importlib
 import os
 import platform
 import queue
@@ -85,6 +86,17 @@ def _open_folder(path: str) -> None:
         subprocess.Popen(["xdg-open", path])
 
 
+def _split_labels(text: str) -> list[str]:
+    parts = [part.strip() for part in text.replace("\n", ",").split(",")]
+    return [part for part in parts if part]
+
+
+def _label_chip_color(label: str) -> str:
+    palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6"]
+    idx = sum(ord(ch) for ch in label.lower()) % len(palette)
+    return palette[idx]
+
+
 # ── shared log / progress panel ──────────────────────────────────────────────
 
 class LogPanel(ctk.CTkFrame):
@@ -98,7 +110,12 @@ class LogPanel(ctk.CTkFrame):
         self._box = ctk.CTkTextbox(self, state="disabled", wrap="word", height=160)
         self._box.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 0))
 
-        self._bar = ctk.CTkProgressBar(self, mode="indeterminate")
+        self._bar = ctk.CTkProgressBar(
+            self,
+            mode="indeterminate",
+            progress_color="#3b82f6",
+            fg_color="#1f2937",
+        )
         self._bar.grid(row=1, column=0, sticky="ew", padx=4, pady=(4, 0))
         self._bar.set(0)
 
@@ -120,6 +137,7 @@ class LogPanel(ctk.CTkFrame):
 
     def start_spin(self) -> None:
         self._bar.configure(mode="indeterminate")
+        self._bar.set(0)
         self._bar.start()
 
     def set_progress(self, done: int, total: int) -> None:
@@ -644,6 +662,36 @@ class JudgeTab(ctk.CTkFrame):
             text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
 
+        self._summary_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        self._summary_frame.grid(row=1, column=0, columnspan=5,
+                                 sticky="ew", padx=8, pady=(2, 4))
+        for col in range(5):
+            self._summary_frame.grid_columnconfigure(col, weight=1)
+
+        self._processed_var = ctk.StringVar(value="Processed: 0")
+        self._pass_var = ctk.StringVar(value="Pass: 0")
+        self._warn_var = ctk.StringVar(value="Warning: 0")
+        self._fail_var = ctk.StringVar(value="Fail: 0")
+        self._remaining_var = ctk.StringVar(value="Remaining: 0")
+
+        self._summary_labels = []
+        for col, var in enumerate([
+            self._processed_var,
+            self._pass_var,
+            self._warn_var,
+            self._fail_var,
+            self._remaining_var,
+        ]):
+            lbl = ctk.CTkLabel(
+                self._summary_frame,
+                textvariable=var,
+                corner_radius=8,
+                fg_color="#232323",
+                text_color="#ddd",
+            )
+            lbl.grid(row=0, column=col, padx=4, sticky="ew")
+            self._summary_labels.append(lbl)
+
         # Move vs copy
         self._move_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
@@ -651,7 +699,7 @@ class JudgeTab(ctk.CTkFrame):
             text="Move originals (destructive — default copies)",
             variable=self._move_var,
             text_color="#e74c3c",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
 
         # Deep scan toggle
         self._deep_scan_var = ctk.BooleanVar(value=False)
@@ -660,7 +708,7 @@ class JudgeTab(ctk.CTkFrame):
             text="Optional moondream2 fallback — warning on suspect structure, fail only on clear duplicates",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
 
         self._strict_offline_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
@@ -668,7 +716,7 @@ class JudgeTab(ctk.CTkFrame):
             text="Offline mode — brightness and contrast only (no models or downloads)",
             variable=self._strict_offline_var,
             text_color="#c7d2fe",
-        ).grid(row=2, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+        ).grid(row=3, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
 
         # ── optional backend ──────────────────────────────────────────────────
         adv_toggle = ctk.CTkButton(
@@ -677,7 +725,7 @@ class JudgeTab(ctk.CTkFrame):
             anchor="w", font=ctk.CTkFont(size=11),
             command=self._toggle_advanced,
         )
-        adv_toggle.grid(row=3, column=0, columnspan=2,
+        adv_toggle.grid(row=4, column=0, columnspan=2,
                         sticky="w", padx=6, pady=(4, 2))
         self._adv_toggle_btn = adv_toggle
 
@@ -774,7 +822,7 @@ class JudgeTab(ctk.CTkFrame):
             self._adv_toggle_btn.configure(
                 text="▶  Vision backend (optional)")
         else:
-            self._adv_frame.grid(row=3, column=0, columnspan=2,
+            self._adv_frame.grid(row=4, column=0, columnspan=2,
                                   sticky="ew", padx=4, pady=(0, 6))
             self._adv_toggle_btn.configure(
                 text="▼  Vision backend (optional)")
@@ -800,6 +848,18 @@ class JudgeTab(ctk.CTkFrame):
                 kw.update(fg_color=color, corner_radius=6, text_color="white")
             ctk.CTkLabel(self._results_frame, text=text, **kw).grid(
                 row=row_idx, column=col, padx=3, pady=1, sticky="w")
+
+    def _update_summary(self):
+        processed = len(self._results)
+        counts = {s: sum(1 for r in self._results if r.get("status") == s)
+                  for s in ("pass", "warning", "fail")}
+        total = max(processed, 0)
+        self._processed_var.set(f"Processed: {processed}")
+        self._pass_var.set(f"Pass: {counts['pass']}")
+        self._warn_var.set(f"Warning: {counts['warning']}")
+        self._fail_var.set(f"Fail: {counts['fail']}")
+        remaining = max(0, getattr(self, "_total_items", 0) - processed)
+        self._remaining_var.set(f"Remaining: {remaining}")
 
     # ── worker ────────────────────────────────────────────────────────────────
 
@@ -836,6 +896,7 @@ class JudgeTab(ctk.CTkFrame):
                 w.destroy()
         self._results.clear()
         self._result_row = 1
+        self._total_items = 0
 
         opts = dict(
             input_path=inp,
@@ -859,14 +920,20 @@ class JudgeTab(ctk.CTkFrame):
     def _worker(self, opts: dict, stop_event: threading.Event):
         q = self._q
         try:
-            from qc_pipeline import collect_images, classify_image, \
-                classify_image_with_backend, QCSettings
+            import qc_pipeline as qc_module
+            qc_module = importlib.reload(qc_module)
+            collect_images = qc_module.collect_images
+            classify_image = qc_module.classify_image
+            classify_image_with_backend = qc_module.classify_image_with_backend
+            QCSettings = qc_module.QCSettings
+            qc_module._reset_human_readable_log(opts["output_dir"])
 
             images = collect_images(opts["input_path"])
             if not images:
                 q.put(("error",
                        f"No images found in {opts['input_path']}"))
                 return
+            q.put(("total", len(images)))
 
             use_backend = bool(opts["backend_url"]) and not opts["strict_offline"]
             if opts["strict_offline"]:
@@ -958,9 +1025,14 @@ class JudgeTab(ctk.CTkFrame):
                     self._results.append(result)
                     self._add_result_row(result, self._result_row)
                     self._result_row += 1
+                    self._update_summary()
+                elif kind == "total":
+                    self._total_items = msg[1]
+                    self._update_summary()
                 elif kind == "done":
                     self._log.stop()
                     self._log.log(msg[1])
+                    self._update_summary()
                     self._run_btn.configure(state="normal", text="Run QC")
                     self._stop_btn.configure(state="disabled", text="Stop QC")
                     self._running = False
@@ -973,7 +1045,7 @@ class JudgeTab(ctk.CTkFrame):
                 elif kind == "stopped":
                     self._log.stop()
                     self._log.log(msg[1])
-                    self._run_btn.configure(state="normal")
+                    self._run_btn.configure(state="normal", text="Run QC")
                     self._stop_btn.configure(state="disabled", text="Stop QC")
                     self._running = False
         except queue.Empty:
