@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from qwen_structure import MODEL_ID, QwenStructureJudge
+from qwen_structure import DEFAULT_BACKEND_MODEL, DEFAULT_BACKEND_URL, MODEL_ID, QwenStructureJudge
 
 
 def _load_labels(path: Path) -> dict[str, str]:
@@ -35,6 +35,7 @@ def _metrics(rows: list[dict[str, object]]) -> dict[str, object]:
     tn = sum(row["expected"] == row["actual"] == "pass" for row in completed)
     fp = sum(row["expected"] == "pass" and row["actual"] == "fail" for row in completed)
     fn = sum(row["expected"] == "fail" and row["actual"] == "pass" for row in completed)
+    warnings = sum(row["actual"] == "warning" for row in completed)
     total = len(completed)
     return {
         "completed": total,
@@ -47,6 +48,7 @@ def _metrics(rows: list[dict[str, object]]) -> dict[str, object]:
         "true_pass": tn,
         "false_fail": fp,
         "missed_fail": fn,
+        "warnings": warnings,
     }
 
 
@@ -55,6 +57,9 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--model", default=MODEL_ID)
+    parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
+    parser.add_argument("--model-name", default=DEFAULT_BACKEND_MODEL)
+    parser.add_argument("--api-key")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -63,7 +68,12 @@ def main() -> None:
     if missing:
         parser.error(f"labeled images not found under {args.input}: {', '.join(missing)}")
 
-    judge = QwenStructureJudge(args.model)
+    judge = QwenStructureJudge(
+        args.model,
+        backend_url=args.backend_url,
+        model_name=args.model_name,
+        api_key=args.api_key,
+    )
     rows: list[dict[str, object]] = []
     for filename, expected in labels.items():
         started = time.perf_counter()
@@ -75,10 +85,11 @@ def main() -> None:
                 defect=decision.defect,
                 confidence=decision.confidence,
                 evidence=decision.evidence,
+                review=decision.review,
             )
             print(
                 f"{filename}\n"
-                f"  expected={expected} actual={decision.verdict} "
+                f"  expected={expected} actual={decision.verdict} review={decision.review} "
                 f"defect={decision.defect} confidence={decision.confidence:.2f}\n"
                 f"  evidence={decision.evidence}\n"
             )
@@ -92,7 +103,7 @@ def main() -> None:
     print(
         f"accuracy={metrics['correct']}/{metrics['completed']} "
         f"({metrics['accuracy']:.1%}) | fail precision={metrics['fail_precision']:.1%} "
-        f"recall={metrics['fail_recall']:.1%} | errors={metrics['errors']}"
+        f"recall={metrics['fail_recall']:.1%} | warnings={metrics['warnings']} | errors={metrics['errors']}"
     )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

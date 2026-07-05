@@ -640,7 +640,7 @@ class JudgeTab(ctk.CTkFrame):
         # Info label
         ctk.CTkLabel(
             opts,
-            text="YOLO pose catches obvious duplicate heads/torsos. moondream2 is a fallback (~2 GB).",
+            text="YOLO pose catches obvious duplicate heads/torsos. The optional vision backend can use oMLX or LM Studio for a stronger second opinion.",
             text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
 
@@ -654,10 +654,10 @@ class JudgeTab(ctk.CTkFrame):
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
 
         # Deep scan toggle
-        self._deep_scan_var = ctk.BooleanVar(value=True)
+        self._deep_scan_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             opts,
-            text="Pose structure scan + moondream2 fallback — major duplicated/fused figures only",
+            text="Optional moondream2 fallback — warning on suspect structure, fail only on clear duplicates",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
@@ -685,10 +685,10 @@ class JudgeTab(ctk.CTkFrame):
 
         ctk.CTkLabel(self._adv_frame, text="Backend URL", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._backend_var = ctk.StringVar()
+        self._backend_var = ctk.StringVar(value="http://127.0.0.1:8001/v1")
         ctk.CTkEntry(
             self._adv_frame, textvariable=self._backend_var,
-            placeholder_text="LM Studio: http://127.0.0.1:1234/v1",
+            placeholder_text="oMLX: http://127.0.0.1:8001/v1",
         ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
         self._adv_frame.grid_columnconfigure(1, weight=1)
 
@@ -896,19 +896,30 @@ class JudgeTab(ctk.CTkFrame):
                 q.put(("progress", i, len(images)))
                 q.put(("log",
                        f"[{i+1}/{len(images)}] {os.path.basename(path)}"))
-                if use_backend:
-                    r = classify_image_with_backend(
-                        path, opts["backend_url"], opts["output_dir"],
-                        model_name=opts["model_name"],
-                        move_files=opts["move_files"],
-                        api_key=opts["api_key"],
-                    )
-                else:
-                    r = classify_image(
-                        path, opts["output_dir"],
-                        move_files=opts["move_files"],
-                        settings=settings,
-                    )
+                try:
+                    if use_backend:
+                        r = classify_image_with_backend(
+                            path, opts["backend_url"], opts["output_dir"],
+                            model_name=opts["model_name"],
+                            move_files=opts["move_files"],
+                            api_key=opts["api_key"],
+                        )
+                    else:
+                        r = classify_image(
+                            path, opts["output_dir"],
+                            move_files=opts["move_files"],
+                            settings=settings,
+                        )
+                except Exception as exc:
+                    r = {
+                        "filename": os.path.basename(path),
+                        "status": "warning",
+                        "score": 50.0,
+                        "issues": [f"QC skipped after error: {exc}"],
+                        "structure_note": "",
+                        "destination": path,
+                    }
+                    q.put(("log", f"Skipping {os.path.basename(path)} after error: {exc}"))
                 results.append(r)
                 q.put(("result", r))
                 q.put(("progress", i + 1, len(images)))

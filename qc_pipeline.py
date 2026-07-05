@@ -61,6 +61,37 @@ _YOLO_POSE_FILE    = "yolo11n-pose.pt"
 _MOONDREAM_REPO    = "vikhyatk/moondream2"
 _MOONDREAM_REVISION = "2025-01-09"   # pinned for reproducibility
 
+_STRONG_STRUCTURE_PATTERNS = (
+    "duplicate head",
+    "two heads",
+    "extra head",
+    "twin",
+    "twins",
+    "duplicate torso",
+    "two torsos",
+    "fused bodies",
+    "fused body",
+    "fused person",
+    "sharing a lower body",
+    "sharing one lower body",
+    "extra arm",
+    "extra leg",
+    "split person",
+    "split head",
+)
+
+_SUSPECT_STRUCTURE_PATTERNS = (
+    "two distinct heads",
+    "two people",
+    "similar body proportions",
+    "appears to be twins",
+    "twins",
+    "twin",
+    "overlapping limbs",
+    "shared body",
+    "shared torso",
+)
+
 
 # ---------------------------------------------------------------------------
 # Model caches (process-level singletons)
@@ -335,11 +366,21 @@ def _get_moondream():
     global _moondream_cache
     if _moondream_cache is None:
         import torch
+        from huggingface_hub import snapshot_download
         from transformers import AutoModelForCausalLM
+
+        model_path = snapshot_download(
+            _MOONDREAM_REPO,
+            revision=_MOONDREAM_REVISION,
+            local_files_only=True,
+        )
         print(f"Loading moondream2 ({_MOONDREAM_REPO} @ {_MOONDREAM_REVISION}) …")
         model = AutoModelForCausalLM.from_pretrained(
-            _MOONDREAM_REPO, revision=_MOONDREAM_REVISION,
-            trust_remote_code=True, dtype=torch.float32)
+            model_path,
+            trust_remote_code=True,
+            local_files_only=True,
+            dtype=torch.float32,
+        )
         device = (torch.device("cuda") if torch.cuda.is_available()
                   else torch.device("mps") if torch.backends.mps.is_available()
                   else torch.device("cpu"))
@@ -349,7 +390,7 @@ def _get_moondream():
     return _moondream_cache
 
 
-def _run_moondream(image_path: str) -> Dict[str, Any]:
+def _run_moondream(image_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
     """Ask moondream2 whether the image has structure defects.
 
     Returns:
@@ -376,6 +417,7 @@ def _run_moondream(image_path: str) -> Dict[str, Any]:
     )
     result = model.query(img, prompt)  # type: ignore
     answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
+    _append_human_readable_response(output_dir, image_path, "moondream2", answer)
 
     verdict = _parse_structure_verdict(answer)
 
@@ -398,6 +440,33 @@ def _parse_structure_verdict(answer: str) -> str:
     if not match:
         return "uncertain"
     return match.group(1).lower()
+
+
+def _append_human_readable_response(
+    output_dir: Optional[str],
+    image_path: str,
+    source: str,
+    text: str,
+) -> None:
+    """Append a readable model response to a text log for later review."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"[{stamp}] {os.path.basename(image_path)} | {source}\n")
+        fh.write(text.rstrip() + "\n\n")
+
+
+def _is_strong_structure_defect(note: str) -> bool:
+    lowered = note.lower()
+    return any(pattern in lowered for pattern in _STRONG_STRUCTURE_PATTERNS)
+
+
+def _is_suspect_structure(note: str) -> bool:
+    lowered = note.lower()
+    return any(pattern in lowered for pattern in _SUSPECT_STRUCTURE_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +509,7 @@ class QCSettings:
         score_warn: float = 50.0,
         # Feature toggles
         use_yolo: bool = True,
-        use_deep_scan: bool = True,   # moondream2
+        use_deep_scan: bool = False,   # moondream2
         deep_scan_persons_only: bool = True,
         strict_offline: bool = False,
         # Deep-scan strictness
@@ -532,26 +601,34 @@ def classify_image(
     )
     if run_deep:
         try:
-            scan = _run_moondream(image_path)
+            scan = _run_moondream(image_path, output_dir)
             structure_note = scan["structure_note"]
 
             verdict = scan.get("verdict", "pass" if scan["structure_ok"] else "uncertain")
             if verdict == "fail":
-                issues.append(f"major structure defect: {structure_note}")
-            elif verdict == "uncertain":
-                # Escalate uncertain verdicts about twins/duplicates to fail
-                note_lower = structure_note.lower()
-                if "twin" in note_lower or "duplicate" in note_lower or "similar" in note_lower:
+                if _is_strong_structure_defect(structure_note):
                     issues.append(f"major structure defect: {structure_note}")
                 else:
                     issues.append(f"uncertain structure: {structure_note}")
+            elif verdict == "uncertain":
+                # Escalate only clearly structural uncertainty to fail.
+                if _is_strong_structure_defect(structure_note):
+                    issues.append(f"major structure defect: {structure_note}")
+                else:
+                    issues.append(f"uncertain structure: {structure_note}")
+            elif _is_suspect_structure(structure_note) and person_count <= 1:
+                issues.append(f"uncertain structure: {structure_note}")
         except Exception as exc:
             issues.append(f"deep scan skipped ({exc})")
 
     # ── Final verdict ─────────────────────────────────────────────────────────
     if any("major structure defect" in issue for issue in issues):
-        status = "fail"
-        score = 0.0
+        if person_count > 2:
+            status = "warning"
+            score = 50.0
+        else:
+            status = "fail"
+            score = 0.0
     elif any("uncertain structure" in issue or "deep scan skipped" in issue for issue in issues):
         status = "warning"
         score = 50.0
@@ -713,12 +790,14 @@ def classify_image_with_backend(
     """Classify one image via an OpenAI-compatible vision backend."""
     img_url = _image_data_url(image_path)
     prompt = (
-        "Inspect the human body structure in this image, counting each visible head, "
-        "torso, arm, leg, and complete person before deciding. FAIL only for a "
-        "clear major structural defect: duplicate heads, two torsos joined to one "
-        "lower body, extra limbs, or visibly fused bodies. PASS normal separate "
-        "people and do not penalize cropping, occlusion, pose, hands, clothing, "
-        "lighting, blur, or artistic style. If genuinely ambiguous use WARNING. "
+        "Review this image for human body structure issues.\n"
+        "Use FAIL for severe problems like heads in the wrong place, duplicate "
+        "heads, multiple torsos that look fused, limbs attached in impossible "
+        "ways, or people that appear merged together like twins sharing the same "
+        "body.\n"
+        "Use WARNING for minor problems like small proportion issues, awkward "
+        "poses, mild weirdness, or other hiccups that are not clearly severe.\n"
+        "Use PASS when no issues are detected, and do not be overly picky.\n"
         "Return only JSON: {\"status\":\"pass|warning|fail\","
         "\"score\":0-100,\"issues\":[\"brief evidence\"]}."
     )
@@ -732,8 +811,8 @@ def classify_image_with_backend(
         },
         "messages": [
             {"role": "system", "content": (
-                "You are a conservative image QC judge. Base the verdict only "
-                "on structure actually visible in the supplied image."
+                "You are an image review judge. Be practical and conservative "
+                "about only clearly severe structure issues."
             )},
             {"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -756,11 +835,19 @@ def classify_image_with_backend(
     if not text:
         raise ValueError("Backend returned no content")
 
-    parsed = _parse_llm_response(text)
-    status = parsed.get("status", "warning")
-    score  = float(parsed.get("score") or
-                   (100 if status == "pass" else 65 if status == "warning" else 30))
-    issues = parsed.get("issues") or []
+    _append_human_readable_response(output_dir, image_path, "backend", text)
+
+    try:
+        parsed = _parse_llm_response(text)
+        status = parsed.get("status", "warning")
+        score = float(parsed.get("score") or
+                      (100 if status == "pass" else 65 if status == "warning" else 30))
+        issues = parsed.get("issues") or []
+    except Exception as exc:
+        # Keep the batch moving even if the backend emits malformed JSON.
+        status = "warning"
+        score = 50.0
+        issues = [f"backend response parse failed: {exc}"]
 
     os.makedirs(output_dir, exist_ok=True)
     for folder in ("pass", "warning", "fail"):
@@ -869,8 +956,8 @@ def main() -> None:
     p.add_argument("--api-key", default=None,
                    help="Optional Bearer token for the vision backend")
     p.add_argument("--model",        default="llama-3.2-11b-vision-instruct")
-    p.add_argument("--deep-scan", dest="deep_scan", action="store_true", default=True,
-                   help="Enable moondream2 structure scan (default)")
+    p.add_argument("--deep-scan", dest="deep_scan", action="store_true", default=False,
+                   help="Enable moondream2 structure scan")
     p.add_argument("--no-deep-scan", dest="deep_scan", action="store_false",
                    help="Disable moondream2 and run detection metadata only")
     p.add_argument("--strictness",   default="balanced",
@@ -884,7 +971,7 @@ def main() -> None:
     settings = QCSettings(
         use_yolo=not args.no_yolo and not args.strict_offline,
         use_deep_scan=args.deep_scan and not args.strict_offline,
-        deep_scan_persons_only=False,
+        deep_scan_persons_only=True,
         strict_offline=args.strict_offline,
         deep_scan_strictness=args.strictness,
     )

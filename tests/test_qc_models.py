@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 from qc_pipeline import (
-    QCSettings, _chat_completions_url, _parse_structure_verdict, _run_moondream,
+    QCSettings, _chat_completions_url, _is_strong_structure_defect,
+    _parse_structure_verdict, _run_moondream,
     classify_image, classify_image_with_backend,
 )
 
@@ -376,6 +377,11 @@ class TestQCModelDecisions(unittest.TestCase):
             "uncertain",
         )
 
+    def test_strong_defect_detector_only_matches_clear_duplicate_structure(self):
+        self.assertTrue(_is_strong_structure_defect("duplicate torso: hips vertically aligned"))
+        self.assertTrue(_is_strong_structure_defect("two heads visible on one body"))
+        self.assertFalse(_is_strong_structure_defect("uncertain structure: torso partly obscured"))
+
     @patch("qc_pipeline._run_moondream")
     @patch("qc_pipeline._run_yolo_pose")
     @patch("qc_pipeline._run_yolo")
@@ -419,6 +425,31 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0)
         self.assertEqual(mock_post.call_args.kwargs["api_key"], "secret-token")
         self.assertEqual(result["status"], "fail")
+
+        user_prompt = payload["messages"][1]["content"][0]["text"]
+        self.assertIn("Use FAIL for severe problems", user_prompt)
+        self.assertIn("Use WARNING for minor problems", user_prompt)
+        self.assertIn("Use PASS when no issues are detected", user_prompt)
+        self.assertNotIn("counting each visible head", user_prompt)
+
+    @patch("qc_pipeline._http_post")
+    def test_backend_logs_human_readable_response(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"status":"warning","score":50,"issues":["cropped body"]}'
+        )}}]}
+
+        output_dir = os.path.join(self.tmpdir, "out")
+        classify_image_with_backend(
+            self.image_path, "http://127.0.0.1:8000/v1",
+            output_dir, model_name="vision-model",
+        )
+
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            log = handle.read()
+        self.assertIn("backend", log)
+        self.assertIn("cropped body", log)
 
 
 if __name__ == "__main__":

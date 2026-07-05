@@ -50,8 +50,8 @@ StereoSift has three main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
-Judge uses pixel checks first, then YOLO for person/object detection, and then
-an structure scan when that path is enabled.
+Judge uses pixel checks first, then YOLO for person/object detection, and an
+optional structure fallback when you want a second opinion.
 
 There is also an optional local backend path for Judge. If you point it at LM
 Studio or oMLX, StereoSift sends the image to that server instead of using the
@@ -137,7 +137,7 @@ Three tabs:
   Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
   4128×2208; a true 7680 px source option is also available.
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
-  person counts, issues, and structure notes when the structure scan is on.
+  person counts, issues, and structure notes when the optional structure scan is on.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
 
@@ -221,8 +221,10 @@ stays local to image decoding and pixel heuristics only.
 
 ### Experimental Qwen Benchmark
 
-`qwen_structure.py` is an isolated Qwen3-VL structure judge for model evaluation;
-it is not part of the production routing policy. Once the default
+`qwen_structure.py` is an isolated structure judge for model evaluation; it is not
+part of the production routing policy. It can run either against a local
+Qwen-VL checkpoint in the Hugging Face cache or against an OpenAI-compatible
+vision backend such as oMLX. For the local offline path, once the default
 `Qwen/Qwen3-VL-4B-Instruct` checkpoint is present in the Hugging Face cache,
 benchmark a labeled folder fully offline with:
 
@@ -247,6 +249,10 @@ point the Judge tab at it.
 
 The full `/v1/chat/completions` URL is also accepted. If authentication is on,
 paste the Bearer token into the API key field or pass it with `--api-key`.
+
+The standalone Qwen structure judge also accepts the same backend URL pattern,
+which makes it easy to benchmark the exact vision model you have loaded in
+oMLX.
 
 ```bash
 python qc_pipeline.py \
