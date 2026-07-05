@@ -9,7 +9,7 @@ from PIL import Image
 from qc_pipeline import (
     QCSettings, _chat_completions_url, _is_strong_structure_defect,
     _parse_structure_verdict, _run_moondream,
-    classify_image, classify_image_with_backend,
+    classify_image, classify_image_with_backend, classify_image_with_labels,
 )
 
 
@@ -484,6 +484,48 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(result["route_folder"], "unscored")
         self.assertTrue(result["destination"].startswith(os.path.join(output_dir, "unscored")))
         self.assertTrue(os.path.exists(result["destination"]))
+
+    @patch("qc_pipeline._http_post")
+    def test_organizer_routes_exact_allowed_label(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"label":"indoors","confidence":91,"reason":"Interior room"}'
+        )}}]}
+        output_dir = os.path.join(self.tmpdir, "organized")
+
+        result = classify_image_with_labels(
+            self.image_path,
+            "http://127.0.0.1:8000/v1",
+            ["outdoors", "indoors"],
+            output_dir,
+            model_name="vision-model",
+        )
+
+        self.assertEqual(result["label"], "indoors")
+        self.assertTrue(result["destination"].startswith(os.path.join(output_dir, "indoors")))
+        self.assertTrue(os.path.exists(result["destination"]))
+        schema = mock_post.call_args.args[1]["response_format"]["json_schema"]["schema"]
+        self.assertEqual(schema["properties"]["label"]["enum"], ["outdoors", "indoors"])
+
+    @patch("qc_pipeline._http_post")
+    def test_organizer_does_not_route_invented_label(self, mock_post):
+        mock_post.return_value = {"choices": [{"message": {"content": (
+            '{"label":"somewhere","confidence":50,"reason":"Unclear"}'
+        )}}]}
+        output_dir = os.path.join(self.tmpdir, "organized")
+
+        with self.assertRaisesRegex(ValueError, "invented a label"):
+            classify_image_with_labels(
+                self.image_path,
+                "http://127.0.0.1:8000/v1",
+                ["outdoors", "indoors"],
+                output_dir,
+                model_name="vision-model",
+            )
+
+        self.assertFalse(os.path.exists(os.path.join(output_dir, "outdoors", "person.png")))
+        self.assertFalse(os.path.exists(os.path.join(output_dir, "indoors", "person.png")))
+        with open(os.path.join(output_dir, "model_responses.log"), encoding="utf-8") as handle:
+            self.assertIn("label=error", handle.read())
 
 
 if __name__ == "__main__":

@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qc_pipeline import QCSettings, _reset_human_readable_log, _route_image, collect_images, run_qc
+from qc_pipeline import (
+    QCSettings,
+    _reset_human_readable_log,
+    _route_image,
+    collect_images,
+    run_qc,
+    validate_organizer_labels,
+)
 
 
 class TestQCPipeline(unittest.TestCase):
@@ -43,6 +50,20 @@ class TestQCPipeline(unittest.TestCase):
             payload = json.load(handle)
         self.assertEqual(len(payload), 2)
 
+    def test_run_qc_logs_start_finish_and_runtime(self):
+        output_dir = os.path.join(self.tmpdir, "out")
+        run_qc(
+            self.input_dir,
+            output_dir,
+            settings=QCSettings(use_yolo=False, use_deep_scan=False),
+        )
+
+        with open(os.path.join(output_dir, "model_responses.log"), "r", encoding="utf-8") as handle:
+            log = handle.read()
+        self.assertIn("Run started: qc", log)
+        self.assertIn("Run finished: qc", log)
+        self.assertIn("elapsed=", log)
+
     def test_run_qc_strict_offline_ignores_backend_url(self):
         output_dir = os.path.join(self.tmpdir, "out")
         results = run_qc(
@@ -77,6 +98,20 @@ class TestQCPipeline(unittest.TestCase):
 
         with open(log_path, "r", encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "")
+
+    def test_organizer_labels_are_trimmed_and_unique(self):
+        self.assertEqual(
+            validate_organizer_labels([" outdoors ", "indoors"]),
+            ["outdoors", "indoors"],
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            validate_organizer_labels(["Older", "older"])
+
+    def test_organizer_labels_cannot_escape_output_folder(self):
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            validate_organizer_labels(["safe", "../outside"])
+        with self.assertRaisesRegex(ValueError, "cannot be used"):
+            validate_organizer_labels(["safe", "report.json"])
 
 
 class TestBenchmarkStructureDetection(unittest.TestCase):

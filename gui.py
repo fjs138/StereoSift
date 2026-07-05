@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """StereoSift — CustomTkinter GUI.
 
-Three tabs:
+Four tabs:
   • Convert  — 2D images / videos → SBS 3D
   • Upscale  — images → Quest-ready high resolution
   • Judge    — local QC: pass / warning / fail / violations sorting
+  • Organize — vision-model sorting into user-defined folders
 
 All heavy work runs in a background thread so the UI stays responsive.
 Progress and log output stream back to the main thread via a queue.
@@ -18,6 +19,7 @@ import platform
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -45,32 +47,62 @@ def _resolve_img_model(size_label: str, device_type: str) -> str:
 
 # ── shared helpers ────────────────────────────────────────────────────────────
 
+def _suggest_output_path(path: str, output_suffix: str, *, is_file: bool) -> str:
+    if is_file:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        return os.path.join(os.path.dirname(path), f"{stem}-{output_suffix}")
+    return os.path.join(
+        os.path.dirname(path),
+        f"{os.path.basename(path)}-{output_suffix}",
+    )
+
+
 def _browse_file(
     var: ctk.StringVar,
     parent,
     output_var_to_update: ctk.StringVar | None = None,
+    output_suffix: str = "judged",
 ) -> None:
     """Open one file chooser and optionally suggest a sibling output folder."""
     path = filedialog.askopenfilename(parent=parent)
     if path:
+        previous_path = var.get().strip()
         var.set(path)
-        if output_var_to_update and not output_var_to_update.get():
-            stem = os.path.splitext(os.path.basename(path))[0]
-            output_var_to_update.set(
-                os.path.join(os.path.dirname(path), f"{stem}-judged")
+        if output_var_to_update:
+            current_output = output_var_to_update.get().strip()
+            previous_suggestion = (
+                _suggest_output_path(previous_path, output_suffix, is_file=True)
+                if previous_path
+                else ""
             )
+            if not current_output or current_output == previous_suggestion:
+                output_var_to_update.set(
+                    _suggest_output_path(path, output_suffix, is_file=True)
+                )
 
 
-def _browse_folder(var: ctk.StringVar, parent, output_var_to_update: ctk.StringVar | None = None) -> None:
+def _browse_folder(
+    var: ctk.StringVar,
+    parent,
+    output_var_to_update: ctk.StringVar | None = None,
+    output_suffix: str = "judged",
+) -> None:
     """Open exactly one folder chooser and optionally suggest a sibling output folder."""
     path = filedialog.askdirectory(parent=parent)
     if path:
+        previous_path = var.get().strip()
         var.set(path)
-        if output_var_to_update and not output_var_to_update.get():
-            default_output = os.path.join(
-                os.path.dirname(path), f"{os.path.basename(path)}-judged"
+        if output_var_to_update:
+            current_output = output_var_to_update.get().strip()
+            previous_suggestion = (
+                _suggest_output_path(previous_path, output_suffix, is_file=False)
+                if previous_path
+                else ""
             )
-            output_var_to_update.set(default_output)
+            if not current_output or current_output == previous_suggestion:
+                output_var_to_update.set(
+                    _suggest_output_path(path, output_suffix, is_file=False)
+                )
 
 
 def _open_folder(path: str) -> None:
@@ -97,6 +129,20 @@ def _label_chip_color(label: str) -> str:
     return palette[idx]
 
 
+def _progress_display(done: int, total: int) -> tuple[float, int]:
+    """Return determinate bar fraction and displayed percent.
+
+    In-progress work should never display 100%, which is reserved for completion.
+    """
+    if total <= 0:
+        return 0.0, 0
+    frac = min(max(done / total, 0.0), 1.0)
+    percent = round(frac * 100)
+    if done < total:
+        percent = min(percent, 99)
+    return frac, percent
+
+
 # ── shared log / progress panel ──────────────────────────────────────────────
 
 class LogPanel(ctk.CTkFrame):
@@ -121,6 +167,12 @@ class LogPanel(ctk.CTkFrame):
 
         self._lbl = ctk.CTkLabel(self, text="", text_color="#aaa")
         self._lbl.grid(row=2, column=0, sticky="w", padx=6, pady=(0, 4))
+        self._timer_lbl = ctk.CTkLabel(self, text="", text_color="#aaa")
+        self._timer_lbl.grid(row=2, column=0, sticky="e", padx=6, pady=(0, 4))
+
+        self._started_at: float | None = None
+        self._last_total: int = 0
+        self._last_done: int = 0
 
     def log(self, text: str) -> None:
         self._box.configure(state="normal")
@@ -133,25 +185,58 @@ class LogPanel(ctk.CTkFrame):
         self._box.delete("1.0", "end")
         self._box.configure(state="disabled")
         self._lbl.configure(text="")
+        self._timer_lbl.configure(text="")
         self._bar.set(0)
+        self._started_at = None
+        self._last_total = 0
+        self._last_done = 0
 
     def start_spin(self) -> None:
+        self._started_at = time.perf_counter()
+        self._last_total = 0
+        self._last_done = 0
+        self._timer_lbl.configure(text="Elapsed: 0:00")
         self._bar.configure(mode="indeterminate")
         self._bar.set(0)
         self._bar.start()
 
+    def _format_seconds(self, seconds: float) -> str:
+        seconds = max(0.0, seconds)
+        minutes, sec = divmod(int(seconds + 0.5), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{sec:02d}"
+        return f"{minutes}:{sec:02d}"
+
+    def _update_timer(self) -> None:
+        if self._started_at is None:
+            return
+        elapsed = time.perf_counter() - self._started_at
+        text = f"Elapsed: {self._format_seconds(elapsed)}"
+        if self._last_total > 0 and self._last_done > 0:
+            rate = elapsed / self._last_done
+            remaining = max(0, self._last_total - self._last_done)
+            text += f"  |  ETA: {self._format_seconds(rate * remaining)}"
+        self._timer_lbl.configure(text=text)
+
     def set_progress(self, done: int, total: int) -> None:
+        self._last_done = done
+        self._last_total = total
         if total > 0:
-            frac = done / total
+            frac, percent = _progress_display(done, total)
             self._bar.configure(mode="determinate")
             self._bar.stop()
             self._bar.set(frac)
-            self._lbl.configure(text=f"{done} / {total}  ({frac*100:.0f}%)")
+            self._lbl.configure(text=f"{done} / {total}  ({percent}%)")
+        self._update_timer()
 
     def stop(self) -> None:
         self._bar.stop()
         self._bar.configure(mode="determinate")
         self._bar.set(1)
+        if self._started_at is not None:
+            elapsed = time.perf_counter() - self._started_at
+            self._timer_lbl.configure(text=f"Elapsed: {self._format_seconds(elapsed)}")
 
 
 # ── Convert tab ───────────────────────────────────────────────────────────────
@@ -934,6 +1019,11 @@ class JudgeTab(ctk.CTkFrame):
             classify_image_with_backend = qc_module.classify_image_with_backend
             QCSettings = qc_module.QCSettings
             qc_module._reset_human_readable_log(opts["output_dir"])
+            started_at = time.perf_counter()
+            qc_module._append_run_event(
+                opts["output_dir"],
+                f"Run started: qc input={opts['input_path']}",
+            )
 
             images = collect_images(opts["input_path"])
             if not images:
@@ -1009,6 +1099,11 @@ class JudgeTab(ctk.CTkFrame):
             violations = sum(
                 1 for r in results if r.get("route_folder") == "unscored"
             )
+            elapsed = time.perf_counter() - started_at
+            qc_module._append_run_event(
+                opts["output_dir"],
+                f"Run finished: qc images={len(results)} elapsed={elapsed:.2f}s",
+            )
             q.put(("done",
                    f"Done — {len(results)} images  |  "
                    f"✓ {counts['pass']} pass   "
@@ -1064,6 +1159,380 @@ class JudgeTab(ctk.CTkFrame):
         self.after(100, self._poll)
 
 
+# ── Organize tab ──────────────────────────────────────────────────────────────
+
+class OrganizeTab(ctk.CTkFrame):
+    """Sort images into user-defined folders with a vision backend."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._q: queue.Queue = queue.Queue()
+        self._running = False
+        self._results: list[dict] = []
+        self._labels: list[str] = []
+        self._total_items = 0
+        self._result_row = 1
+        self._stop_event = threading.Event()
+        self._build()
+        self._poll()
+
+    def _build(self):
+        paths = ctk.CTkFrame(self)
+        paths.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        paths.grid_columnconfigure(1, weight=1)
+
+        self._input_var = ctk.StringVar()
+        self._output_var = ctk.StringVar()
+        ctk.CTkLabel(paths, text="Input (file or folder)", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(8, 6), pady=5)
+        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
+            row=0, column=1, sticky="ew", pady=5)
+        ctk.CTkButton(
+            paths, text="File…", width=65,
+            command=lambda: _browse_file(
+                self._input_var, self, self._output_var, "organized"
+            ),
+        ).grid(row=0, column=2, padx=(6, 3), pady=5)
+        ctk.CTkButton(
+            paths, text="Folder…", width=70,
+            command=lambda: _browse_folder(
+                self._input_var, self, self._output_var, "organized"
+            ),
+        ).grid(row=0, column=3, padx=(3, 8), pady=5)
+
+        ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(8, 6), pady=5)
+        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
+            row=1, column=1, sticky="ew", pady=5)
+        ctk.CTkButton(
+            paths, text="Browse", width=80,
+            command=lambda: _browse_folder(self._output_var, self),
+        ).grid(row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+
+        opts = ctk.CTkFrame(self)
+        opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        opts.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(opts, text="Category labels", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4))
+        self._labels_var = ctk.StringVar()
+        ctk.CTkEntry(
+            opts,
+            textvariable=self._labels_var,
+            placeholder_text="outdoors, indoors  or  color, black-and-white",
+        ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(8, 4))
+        ctk.CTkLabel(
+            opts,
+            text="Enter two or more comma-separated choices. The model must choose exactly one per image.",
+            text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
+        ).grid(row=1, column=1, columnspan=3, sticky="w", padx=(0, 8), pady=(0, 6))
+
+        ctk.CTkLabel(opts, text="Backend URL", anchor="w").grid(
+            row=2, column=0, sticky="w", padx=(8, 6), pady=4)
+        self._backend_var = ctk.StringVar(value="http://127.0.0.1:8001/v1")
+        ctk.CTkEntry(
+            opts, textvariable=self._backend_var,
+            placeholder_text="oMLX or LM Studio OpenAI-compatible URL",
+        ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=4)
+
+        ctk.CTkLabel(opts, text="Model name", anchor="w").grid(
+            row=2, column=2, sticky="w", padx=(8, 6), pady=4)
+        self._model_var = ctk.StringVar(value="Qwen3.6-35B-A3B-MLX-4bit")
+        ctk.CTkEntry(opts, textvariable=self._model_var, width=240).grid(
+            row=2, column=3, sticky="ew", padx=(0, 8), pady=4)
+
+        ctk.CTkLabel(opts, text="API key", anchor="w").grid(
+            row=3, column=0, sticky="w", padx=(8, 6), pady=4)
+        self._api_key_var = ctk.StringVar()
+        ctk.CTkEntry(
+            opts, textvariable=self._api_key_var, show="•",
+            placeholder_text="Optional Bearer token",
+        ).grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=4)
+
+        self._move_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            opts,
+            text="Move originals (destructive — default copies)",
+            variable=self._move_var,
+            text_color="#e74c3c",
+        ).grid(row=3, column=2, columnspan=2, sticky="w", padx=8, pady=4)
+
+        self._summary_var = ctk.StringVar(value="Processed: 0  ·  Remaining: 0")
+        ctk.CTkLabel(
+            opts, textvariable=self._summary_var, anchor="w",
+            corner_radius=8, fg_color="#232323", text_color="#ddd",
+            wraplength=800, justify="left",
+        ).grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 8))
+
+        results_outer = ctk.CTkFrame(self)
+        results_outer.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        results_outer.grid_columnconfigure(0, weight=1)
+        results_outer.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            results_outer, text="Organization results",
+            font=ctk.CTkFont(weight="bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+
+        canvas = tk.Canvas(results_outer, bg="#2b2b2b", highlightthickness=0, height=180)
+        scrollbar = ctk.CTkScrollbar(results_outer, command=canvas.yview)
+        self._results_frame = ctk.CTkFrame(canvas, fg_color="transparent")
+        self._results_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self._results_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=1, column=0, sticky="nsew", padx=(4, 0))
+        scrollbar.grid(row=1, column=1, sticky="ns")
+
+        for col, (text, width) in enumerate([
+            ("File", 230), ("Label", 140), ("Confidence", 85), ("Reason", 360),
+        ]):
+            ctk.CTkLabel(
+                self._results_frame, text=text,
+                font=ctk.CTkFont(weight="bold"), width=width, anchor="w",
+            ).grid(row=0, column=col, padx=3, pady=2, sticky="w")
+
+        self._log = LogPanel(self)
+        self._log.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="ew")
+        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+        self._run_btn = ctk.CTkButton(
+            btn_row, text="Organize images", height=38, command=self._run)
+        self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._stop_btn = ctk.CTkButton(
+            btn_row, text="Stop", height=38, command=self._stop,
+            state="disabled", fg_color="#cc2222", hover_color="#dd3333",
+        )
+        self._stop_btn.grid(row=0, column=1, padx=4, sticky="ew")
+        ctk.CTkButton(
+            btn_row, text="Open output folder", height=38,
+            fg_color="#444", hover_color="#555",
+            command=lambda: _open_folder(self._output_var.get().strip()),
+        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
+
+    def _run(self):
+        if self._running:
+            return
+        input_path = self._input_var.get().strip()
+        output_dir = self._output_var.get().strip()
+        backend_url = self._backend_var.get().strip()
+        model_name = self._model_var.get().strip()
+        if not input_path or not output_dir:
+            messagebox.showwarning("Missing path", "Please select input and output paths.")
+            return
+        if not backend_url or not model_name:
+            messagebox.showwarning(
+                "Missing backend", "Please provide the vision backend URL and model name."
+            )
+            return
+
+        try:
+            from qc_pipeline import validate_organizer_labels
+            labels = validate_organizer_labels(_split_labels(self._labels_var.get()))
+        except ValueError as exc:
+            messagebox.showwarning("Invalid categories", str(exc))
+            return
+        if len(labels) < 2:
+            messagebox.showwarning(
+                "More categories needed", "Please enter at least two category labels."
+            )
+            return
+        if self._move_var.get() and not messagebox.askyesno(
+            "Move files?",
+            "This will MOVE originals into category subfolders.\n"
+            "This cannot be undone. Continue?",
+        ):
+            return
+
+        for widget in list(self._results_frame.winfo_children()):
+            info = widget.grid_info()
+            if info and int(info.get("row", 0)) > 0:
+                widget.destroy()
+        self._results.clear()
+        self._labels = labels
+        self._total_items = 0
+        self._result_row = 1
+        self._update_summary()
+        self._stop_event.clear()
+        self._running = True
+        self._run_btn.configure(state="disabled", text="Organizing…")
+        self._stop_btn.configure(state="normal", text="Stop")
+        self._log.clear()
+        self._log.start_spin()
+
+        opts = {
+            "input_path": input_path,
+            "output_dir": output_dir,
+            "labels": labels,
+            "backend_url": backend_url,
+            "model_name": model_name,
+            "api_key": self._api_key_var.get().strip() or None,
+            "move_files": self._move_var.get(),
+        }
+        threading.Thread(
+            target=self._worker, args=(opts, self._stop_event), daemon=True
+        ).start()
+
+    def _stop(self):
+        self._stop_event.set()
+        self._stop_btn.configure(state="disabled", text="Stopping…")
+        self._log.log("Stopping organizer after the current image...")
+
+    @staticmethod
+    def _write_report(output_dir: str, results: list[dict]) -> None:
+        import json
+        os.makedirs(output_dir, exist_ok=True)
+        report_path = os.path.join(output_dir, "report.json")
+        temporary_path = report_path + ".tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(results, handle, indent=2)
+        os.replace(temporary_path, report_path)
+
+    def _worker(self, opts: dict, stop_event: threading.Event):
+        q = self._q
+        try:
+            import qc_pipeline as qc_module
+            qc_module = importlib.reload(qc_module)
+            qc_module._reset_human_readable_log(opts["output_dir"])
+            started_at = time.perf_counter()
+            qc_module._append_run_event(
+                opts["output_dir"],
+                f"Run started: organize input={opts['input_path']} labels={', '.join(opts['labels'])}",
+            )
+            images = qc_module.collect_images(opts["input_path"])
+            if not images:
+                raise FileNotFoundError(f"No images found in {opts['input_path']}")
+
+            os.makedirs(opts["output_dir"], exist_ok=True)
+            for label in opts["labels"]:
+                os.makedirs(os.path.join(opts["output_dir"], label), exist_ok=True)
+            self._write_report(opts["output_dir"], [])
+            q.put(("total", len(images)))
+            q.put(("log", f"Found {len(images)} image(s)"))
+            q.put(("log", f"Categories: {', '.join(opts['labels'])}"))
+
+            results = []
+            for index, path in enumerate(images):
+                if stop_event.is_set():
+                    q.put(("stopped", "Organizer stopped by user. Partial report saved."))
+                    return
+                q.put(("progress", index, len(images)))
+                q.put(("log", f"[{index + 1}/{len(images)}] {os.path.basename(path)}"))
+                try:
+                    result = qc_module.classify_image_with_labels(
+                        path,
+                        opts["backend_url"],
+                        opts["labels"],
+                        opts["output_dir"],
+                        model_name=opts["model_name"],
+                        move_files=opts["move_files"],
+                        api_key=opts["api_key"],
+                    )
+                except Exception as exc:
+                    result = {
+                        "filename": os.path.basename(path),
+                        "label": "ERROR",
+                        "status": "error",
+                        "confidence": 0.0,
+                        "reason": str(exc),
+                        "destination": None,
+                        "labels": opts["labels"],
+                    }
+                    q.put(("log", f"Could not organize {os.path.basename(path)}: {exc}"))
+                results.append(result)
+                self._write_report(opts["output_dir"], results)
+                q.put(("result", result))
+                q.put(("progress", index + 1, len(images)))
+
+            errors = sum(1 for result in results if result.get("status") == "error")
+            elapsed = time.perf_counter() - started_at
+            qc_module._append_run_event(
+                opts["output_dir"],
+                f"Run finished: organize images={len(results)} elapsed={elapsed:.2f}s",
+            )
+            q.put((
+                "done",
+                f"Done — {len(results)} image(s) processed, {errors} error(s).",
+            ))
+        except Exception:
+            import traceback
+            traceback_text = traceback.format_exc()
+            q.put(("log", traceback_text))
+            q.put(("error", traceback_text.splitlines()[-1]))
+
+    def _add_result_row(self, result: dict):
+        label = str(result.get("label") or "ERROR")
+        color = "#8b5cf6" if label == "ERROR" else _label_chip_color(label)
+        reason = str(result.get("reason") or "No reason provided.")
+        values = [
+            (os.path.basename(result.get("filename", "")), 230, "w"),
+            (label, 140, "center"),
+            (f"{float(result.get('confidence') or 0):.0f}%", 85, "center"),
+            (reason, 360, "w"),
+        ]
+        for col, (text, width, anchor) in enumerate(values):
+            options = {"width": width, "anchor": anchor, "wraplength": width - 8}
+            if col == 1:
+                options.update(fg_color=color, corner_radius=6, text_color="white")
+            ctk.CTkLabel(self._results_frame, text=text, **options).grid(
+                row=self._result_row, column=col, padx=3, pady=1, sticky="w"
+            )
+        self._result_row += 1
+
+    def _update_summary(self):
+        processed = len(self._results)
+        remaining = max(0, self._total_items - processed)
+        counts = [
+            f"{label}: {sum(1 for result in self._results if result.get('label') == label)}"
+            for label in self._labels
+        ]
+        errors = sum(1 for result in self._results if result.get("status") == "error")
+        parts = [f"Processed: {processed}", *counts]
+        if errors:
+            parts.append(f"Errors: {errors}")
+        parts.append(f"Remaining: {remaining}")
+        self._summary_var.set("  ·  ".join(parts))
+
+    def _finish(self):
+        self._run_btn.configure(state="normal", text="Organize images")
+        self._stop_btn.configure(state="disabled", text="Stop")
+        self._running = False
+
+    def _poll(self):
+        try:
+            while True:
+                msg = self._q.get_nowait()
+                kind = msg[0]
+                if kind == "log":
+                    self._log.log(msg[1])
+                elif kind == "progress":
+                    self._log.set_progress(msg[1], msg[2])
+                elif kind == "total":
+                    self._total_items = msg[1]
+                    self._update_summary()
+                elif kind == "result":
+                    self._results.append(msg[1])
+                    self._add_result_row(msg[1])
+                    self._update_summary()
+                elif kind in {"done", "stopped"}:
+                    self._log.stop()
+                    self._log.log(msg[1])
+                    self._update_summary()
+                    self._finish()
+                elif kind == "error":
+                    self._log.stop()
+                    messagebox.showerror("Organizer error", msg[1])
+                    self._finish()
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class App(ctk.CTk):
@@ -1085,7 +1554,7 @@ class App(ctk.CTk):
             text_color="#7eb3ff",
         ).pack(side="left", padx=16, pady=10)
         ctk.CTkLabel(
-            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC",
+            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC  ·  AI Organize",
             text_color="#666",
         ).pack(side="left", pady=10)
 
@@ -1094,7 +1563,7 @@ class App(ctk.CTk):
         tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
 
         for name, cls in [("Convert", ConvertTab), ("Upscale", UpscaleTab),
-                          ("Judge", JudgeTab)]:
+                          ("Judge", JudgeTab), ("Organize", OrganizeTab)]:
             tabs.add(name)
             tabs.tab(name).grid_columnconfigure(0, weight=1)
             tabs.tab(name).grid_rowconfigure(0, weight=1)

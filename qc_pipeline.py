@@ -480,6 +480,17 @@ def _reset_human_readable_log(output_dir: Optional[str]) -> None:
         fh.write("")
 
 
+def _append_run_event(output_dir: Optional[str], text: str) -> None:
+    """Append a run-level event to the human-readable log."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"[{stamp}] {text}\n")
+
+
 def _is_strong_structure_defect(note: str) -> bool:
     lowered = note.lower()
     return any(pattern in lowered for pattern in _STRONG_STRUCTURE_PATTERNS)
@@ -812,17 +823,38 @@ def _parse_llm_response(text: str) -> Dict[str, Any]:
 
 def _normalize_choice_label(label: str, labels: List[str]) -> str:
     candidate = re.sub(r"[\s_\-]+", "", str(label)).lower()
-    if not candidate and labels:
-        return labels[0]
+    if not candidate:
+        raise ValueError("Backend returned an empty organizer label")
     for option in labels:
         normalized = re.sub(r"[\s_\-]+", "", option).lower()
         if candidate == normalized:
             return option
-    for option in labels:
-        normalized = re.sub(r"[\s_\-]+", "", option).lower()
-        if candidate in normalized or normalized in candidate:
-            return option
-    return labels[0] if labels else str(label)
+    raise ValueError(f"Backend invented a label outside the allowed choices: {label}")
+
+
+def validate_organizer_labels(labels: List[str]) -> List[str]:
+    """Return safe, unique folder labels or raise a user-facing error."""
+    clean_labels = [str(label).strip() for label in labels if str(label).strip()]
+    if not clean_labels:
+        raise ValueError("At least one label is required")
+
+    reserved = {"report.json", "model_responses.log"}
+    invalid_chars = set('<>:"/\\|?*')
+    seen = set()
+    for label in clean_labels:
+        folded = label.casefold()
+        if folded in seen:
+            raise ValueError(f"Duplicate organizer label: {label}")
+        if label in {".", ".."} or folded in reserved:
+            raise ValueError(f"Organizer label cannot be used as a folder: {label}")
+        if len(label) > 100:
+            raise ValueError(f"Organizer label is too long (100 characters max): {label}")
+        if any(char in invalid_chars or ord(char) < 32 for char in label):
+            raise ValueError(
+                f"Organizer label contains a character that is unsafe in a folder name: {label}"
+            )
+        seen.add(folded)
+    return clean_labels
 
 
 def _looks_like_model_refusal(text: str) -> bool:
@@ -946,12 +978,17 @@ def classify_image_with_labels(
     api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Classify one image into one of the provided labels via a vision backend."""
-    clean_labels = [str(label).strip() for label in labels if str(label).strip()]
-    if not clean_labels:
-        raise ValueError("At least one label is required")
+    clean_labels = validate_organizer_labels(labels)
 
     img_url = _image_data_url(image_path)
     label_list = "\n".join(f"- {label}" for label in clean_labels)
+    response_schema = {
+        **_LABEL_RESPONSE_SCHEMA,
+        "properties": {
+            **_LABEL_RESPONSE_SCHEMA["properties"],
+            "label": {"type": "string", "enum": clean_labels},
+        },
+    }
     prompt = (
         "Choose the single best label for this image from the allowed list.\n"
         "Allowed labels:\n"
@@ -967,7 +1004,7 @@ def classify_image_with_labels(
         "max_tokens": 250,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "label_choice", "strict": True, "schema": _LABEL_RESPONSE_SCHEMA},
+            "json_schema": {"name": "label_choice", "strict": True, "schema": response_schema},
         },
         "messages": [
             {"role": "system", "content": (
@@ -1000,9 +1037,18 @@ def classify_image_with_labels(
         confidence = float(parsed.get("confidence") or 0.0)
         reason = str(parsed.get("reason") or "").strip() or "No reason provided."
     except Exception as exc:
-        label = clean_labels[0]
-        confidence = 0.0
         reason = f"backend response parse failed: {exc}"
+        _append_human_readable_response(
+            output_dir,
+            image_path,
+            "organizer",
+            text,
+            final_status="error",
+            final_score=0.0,
+            final_issues=[reason],
+            final_field="label",
+        )
+        raise ValueError(reason) from exc
 
     _append_human_readable_response(
         output_dir,
@@ -1101,6 +1147,8 @@ def run_qc(
     if settings is None:
         settings = _DEFAULT_SETTINGS
     _reset_human_readable_log(output_dir)
+    started_at = time.perf_counter()
+    _append_run_event(output_dir, f"Run started: qc input={input_path}")
     images = collect_images(input_path)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
@@ -1124,6 +1172,11 @@ def run_qc(
 
     counts = {s: sum(1 for r in results if r["status"] == s)
               for s in ("pass", "warning", "fail")}
+    elapsed = time.perf_counter() - started_at
+    _append_run_event(
+        output_dir,
+        f"Run finished: qc images={len(results)} elapsed={elapsed:.2f}s",
+    )
     print(f"QC done — {len(results)} images | "
           f"pass {counts['pass']}  warning {counts['warning']}  "
           f"fail {counts['fail']}")
@@ -1140,11 +1193,14 @@ def run_organize(
     api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run image organization and write report.json."""
-    clean_labels = [str(label).strip() for label in labels if str(label).strip()]
-    if not clean_labels:
-        raise ValueError("At least one label is required")
+    clean_labels = validate_organizer_labels(labels)
 
     _reset_human_readable_log(output_dir)
+    started_at = time.perf_counter()
+    _append_run_event(
+        output_dir,
+        f"Run started: organize input={input_path} labels={', '.join(clean_labels)}",
+    )
     images = collect_images(input_path)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
@@ -1169,6 +1225,11 @@ def run_organize(
     with open(report, "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
 
+    elapsed = time.perf_counter() - started_at
+    _append_run_event(
+        output_dir,
+        f"Run finished: organize images={len(results)} elapsed={elapsed:.2f}s",
+    )
     print(f"Organize done — {len(results)} images | labels: {', '.join(clean_labels)}")
     return results
 

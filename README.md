@@ -1,5 +1,6 @@
 # StereoSift
-StereoSift is a local desktop toolkit for 2D-to-3D conversion, AI upscaling, and image QC.
+StereoSift is a local desktop toolkit for 2D-to-3D conversion, AI upscaling,
+image QC, and vision-assisted folder organization.
 
 ## Deployment
 
@@ -38,20 +39,23 @@ of manual clicking.
 * Convert 2D images into SBS 3D.
 * Convert 2D videos into SBS 3D.
 * Keep original audio when converting video.
-* Show a GUI for both conversion and QC.
+* Show a GUI for conversion, upscaling, QC, and image organization.
 * Sort QC results into `pass`, `warning`, `fail`, and `violations`.
 * Copy originals by default, and only move files when asked.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
+* Sort images into arbitrary user-defined categories such as `outdoors, indoors`.
 
 ## How It Works
 
-StereoSift has three main paths.
+StereoSift has four main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
 Judge uses pixel checks first, then YOLO for person/object detection, and an
 optional structure fallback when you want a second opinion.
+Organize asks an OpenAI-compatible vision model to choose exactly one of your
+category labels for each image, then copies or moves it into that subfolder.
 
 There is also an optional local backend path for Judge. If you point it at LM
 Studio or oMLX, StereoSift sends the image to that server instead of using the
@@ -66,7 +70,7 @@ is the safest choice if you want no network-capable behavior at all.
 | :-- | :-- |
 | `gui.py` | CustomTkinter desktop GUI |
 | `convert.py` | 2D to SBS 3D conversion CLI |
-| `qc_pipeline.py` | QC pipeline for pixel checks, YOLO, moondream2, and optional backend QC |
+| `qc_pipeline.py` | QC and user-defined image organization pipelines |
 | `depth_model.py` | Depth Anything V2 loading |
 | `video_converter.py` | Video Depth Anything streaming and encoding |
 | `sbs/sbs.py` | SBS warping and conversion helpers |
@@ -129,7 +133,7 @@ or use `--strict-offline` on the CLI.
 python gui.py
 ```
 
-Three tabs:
+Four tabs:
 
 * Convert turns 2D images or videos into SBS 3D. Pick a model size, choose the
   output style, and run it.
@@ -140,6 +144,14 @@ Three tabs:
   person counts, issues, and structure notes when the optional structure scan is on.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
+* Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
+  your oMLX/LM Studio vision model for the best match, and creates one output
+  subfolder per label. It copies by default and can optionally move originals.
+
+The Organize tab writes every model response to `model_responses.log` as it is
+received and updates `report.json` after every image. Both files can be opened
+while a batch is still running. A failed request is shown as an error, leaves
+that source image untouched, and does not stop the rest of the batch.
 
 ## SBS Conversion
 

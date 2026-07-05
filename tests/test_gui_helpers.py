@@ -1,7 +1,30 @@
 import unittest
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from gui import _browse_file, _browse_folder
+sys.modules.setdefault(
+    "customtkinter",
+    SimpleNamespace(
+        StringVar=object,
+        BooleanVar=object,
+        CTk=object,
+        CTkFrame=object,
+        CTkTextbox=object,
+        CTkProgressBar=object,
+        CTkLabel=object,
+        CTkButton=object,
+        CTkEntry=object,
+        CTkCheckBox=object,
+        CTkScrollbar=object,
+        CTkTabview=object,
+        CTkFont=object,
+        set_appearance_mode=lambda *_args, **_kwargs: None,
+        set_default_color_theme=lambda *_args, **_kwargs: None,
+    ),
+)
+
+from gui import _browse_file, _browse_folder, _progress_display, _split_labels
 
 
 class FakeVar:
@@ -46,6 +69,55 @@ class TestGuiBrowseHelpers(unittest.TestCase):
         askdirectory.assert_called_once()
         self.assertEqual(input_var.get(), "/pictures/to-review")
         self.assertEqual(output_var.get(), "/pictures/to-review-judged")
+
+    @patch("gui.filedialog.askdirectory", return_value="/pictures/second")
+    def test_judge_browse_updates_auto_suggested_output_when_input_changes(self, askdirectory):
+        input_var = FakeVar("/pictures/first")
+        output_var = FakeVar("/pictures/first-judged")
+
+        _browse_folder(input_var, object(), output_var)
+
+        askdirectory.assert_called_once()
+        self.assertEqual(input_var.get(), "/pictures/second")
+        self.assertEqual(output_var.get(), "/pictures/second-judged")
+
+    @patch("gui.filedialog.askdirectory", return_value="/pictures/second")
+    def test_judge_browse_preserves_manual_output_override(self, askdirectory):
+        input_var = FakeVar("/pictures/first")
+        output_var = FakeVar("/custom/output")
+
+        _browse_folder(input_var, object(), output_var)
+
+        askdirectory.assert_called_once()
+        self.assertEqual(input_var.get(), "/pictures/second")
+        self.assertEqual(output_var.get(), "/custom/output")
+
+    @patch("gui.filedialog.askdirectory", return_value="/pictures/to-sort")
+    def test_organizer_browse_uses_organized_suffix(self, askdirectory):
+        input_var = FakeVar()
+        output_var = FakeVar()
+
+        _browse_folder(input_var, object(), output_var, "organized")
+
+        self.assertEqual(output_var.get(), "/pictures/to-sort-organized")
+
+    def test_split_labels_accepts_commas_and_newlines(self):
+        self.assertEqual(
+            _split_labels(" outdoors, indoors\nnight , "),
+            ["outdoors", "indoors", "night"],
+        )
+
+    def test_progress_display_caps_in_flight_work_at_ninety_nine_percent(self):
+        frac, percent = _progress_display(999, 1000)
+
+        self.assertEqual(frac, 0.999)
+        self.assertEqual(percent, 99)
+
+    def test_progress_display_allows_one_hundred_percent_when_complete(self):
+        frac, percent = _progress_display(1000, 1000)
+
+        self.assertEqual(frac, 1.0)
+        self.assertEqual(percent, 100)
 
 
 if __name__ == "__main__":
