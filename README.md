@@ -39,7 +39,7 @@ of manual clicking.
 * Convert 2D videos into SBS 3D.
 * Keep original audio when converting video.
 * Show a GUI for both conversion and QC.
-* Sort QC results into `pass`, `warning`, and `fail`.
+* Sort QC results into `pass`, `warning`, `fail`, and `violations`.
 * Copy originals by default, and only move files when asked.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
@@ -195,14 +195,17 @@ python qc_pipeline.py --input ~/Pictures/to-review --output-dir output/qc --stri
 sh qc.sh
 ```
 
-Results go into `pass/`, `warning/`, `fail/`, plus a `report.json` summary.
+Results go into `pass/`, `warning/`, `fail/`, `unscored/`, plus a `report.json`
+summary and a `model_responses.log` file with human-readable backend output.
 Originals are copied by default. Use `--move` only if you really want destructive sorting.
 
 Local judgment is intentionally conservative. Only an explicit, confident
 structural `PASS` goes into `pass/`. Clear defects, uncertain verdicts,
 malformed responses, and scan failures land in `fail/`, which acts as the
-manual review queue. Exposure and other minor aesthetic issues do not affect
-the verdict.
+manual review queue. Backend responses that mention a safety/policy
+violation are routed to `unscored/` instead so they stay separate from
+ordinary structure failures. Exposure and other minor aesthetic issues do not
+affect the verdict.
 
 ### QC Pipeline Layers
 

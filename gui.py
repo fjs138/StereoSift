@@ -4,7 +4,7 @@
 Three tabs:
   • Convert  — 2D images / videos → SBS 3D
   • Upscale  — images → Quest-ready high resolution
-  • Judge    — local YOLO QC: pass / warning / fail sorting
+  • Judge    — local QC: pass / warning / fail / violations sorting
 
 All heavy work runs in a background thread so the UI stays responsive.
 Progress and log output stream back to the main thread via a queue.
@@ -672,6 +672,7 @@ class JudgeTab(ctk.CTkFrame):
         self._pass_var = ctk.StringVar(value="Pass: 0")
         self._warn_var = ctk.StringVar(value="Warning: 0")
         self._fail_var = ctk.StringVar(value="Fail: 0")
+        self._unscored_var = ctk.StringVar(value="Unscored: 0")
         self._remaining_var = ctk.StringVar(value="Remaining: 0")
 
         self._summary_labels = []
@@ -680,6 +681,7 @@ class JudgeTab(ctk.CTkFrame):
             self._pass_var,
             self._warn_var,
             self._fail_var,
+            self._unscored_var,
             self._remaining_var,
         ]):
             lbl = ctk.CTkLabel(
@@ -853,11 +855,16 @@ class JudgeTab(ctk.CTkFrame):
         processed = len(self._results)
         counts = {s: sum(1 for r in self._results if r.get("status") == s)
                   for s in ("pass", "warning", "fail")}
+        violations = sum(
+            1 for r in self._results
+            if r.get("route_folder") == "unscored"
+        )
         total = max(processed, 0)
         self._processed_var.set(f"Processed: {processed}")
         self._pass_var.set(f"Pass: {counts['pass']}")
         self._warn_var.set(f"Warning: {counts['warning']}")
         self._fail_var.set(f"Fail: {counts['fail']}")
+        self._unscored_var.set(f"Unscored: {violations}")
         remaining = max(0, getattr(self, "_total_items", 0) - processed)
         self._remaining_var.set(f"Remaining: {remaining}")
 
@@ -999,11 +1006,15 @@ class JudgeTab(ctk.CTkFrame):
 
             counts = {s: sum(1 for r in results if r["status"] == s)
                       for s in ("pass", "warning", "fail")}
+            violations = sum(
+                1 for r in results if r.get("route_folder") == "unscored"
+            )
             q.put(("done",
                    f"Done — {len(results)} images  |  "
                    f"✓ {counts['pass']} pass   "
                    f"⚠ {counts['warning']} warning   "
-                   f"✗ {counts['fail']} fail"))
+                   f"✗ {counts['fail']} fail   "
+                   f"⛔ {violations} violations"))
         except Exception:
             import traceback
             tb = traceback.format_exc()

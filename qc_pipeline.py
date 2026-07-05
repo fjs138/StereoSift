@@ -23,7 +23,7 @@ Pass ``backend_url`` to replace the local moondream2 scan with an API call.
 
 Output
 ------
-``<output_dir>/pass/``, ``warning/``, ``fail/``, ``report.json``
+``<output_dir>/pass/``, ``warning/``, ``fail/``, ``unscored/``, ``report.json``
 """
 
 from __future__ import annotations
