@@ -1,6 +1,14 @@
-# StereoSift
-StereoSift is a local desktop toolkit for 2D-to-3D conversion, AI upscaling,
-image QC, and vision-assisted folder organization.
+<p align="center">
+  <img src="assets/stereosift-logo.png" alt="StereoSift logo" width="220">
+</p>
+
+<h1 align="center">StereoSift</h1>
+
+<p align="center"><strong>Alpha</strong></p>
+
+<p align="center">
+  Local desktop toolkit for 2D-to-3D conversion, AI upscaling, image QC, and vision-assisted folder organization.
+</p>
 
 ## Deployment
 
@@ -104,12 +112,25 @@ project history stays visible without digging through code.
 | YOLO11n as the first QC gate | Catches cheap, obvious person-count and structure issues | Kept, but not treated as a full judge |
 | Moondream2 as the fallback scan | Helps with trickier structure cases when YOLO is not enough | Kept as the second-pass check |
 | Qwen3-VL as an structure judge | Useful for isolated benchmarking, but not stable enough to become the production router | Left experimental |
+| Larger local vision backends for Judge | Can produce stronger reasoning, but latency depends heavily on image detail, resize policy, and prompt shape | Kept optional, not the default assumption |
+| Smaller or faster vision model swaps | Often answer quickly, but some collapse into generic "looks fine" outputs unless the prompt is tuned for that model | Treated as model-specific, not plug-and-play |
+| Strict structured JSON responses | Good for automation, but weaker models may minimize explanation and hide uncertainty behind short answers | Kept for routing, but watched carefully during evaluation |
+| More permissive / less over-constrained QC prompts | In several experiments, this produced more useful image-specific reasoning than rigidly over-instructed prompts | Kept as a practical prompt-design lesson |
+| High-detail image requests to local backends | Improves signal in some borderline cases, but often costs more latency than the QC task justifies | Now treated as a tradeoff, not an automatic default |
 | Strict offline mode | Keeps the QC path fully local when you want zero outbound behavior | Kept as a guardrail |
 | Real-ESRGAN x2plus for Quest prep | Gives cleaner pre-SBS upscaling for Quest-oriented images | Kept and exposed as the new Upscale tab |
 
 The main pattern is pretty simple: YOLO is the cheap first pass, Moondream is
 the harder fallback, Qwen stays a benchmark tool for now, and Real-ESRGAN is the
 image-prep step when you want to feed SBS cleaner source material.
+
+Some extra lessons from the QC experiments:
+
+* Swapping only the model name was rarely enough. Different local vision models needed different prompt pressure, response constraints, and image detail settings.
+* Faster models were not automatically worse, but they were more likely to default to generic reassurance unless the request clearly forced evidence-based judgments.
+* Very large context or token ceilings were usually not the main bottleneck for Judge. Model size, image preprocessing, and per-image visual detail had a bigger effect on throughput.
+* For this project, the best practical results usually came from combining cheap deterministic gates with a second opinion, instead of asking one model to be perfect at everything.
+* Throughput matters: a local batch tool can be technically accurate and still feel wrong if each image takes too long to review, so latency is treated as part of quality.
 
 ## Installation
 

@@ -269,10 +269,14 @@ class ConvertTab(ctk.CTkFrame):
         ctk.CTkEntry(paths, textvariable=self._input_var).grid(
             row=0, column=1, sticky="ew", pady=5)
         ctk.CTkButton(paths, text="File…", width=65,
-                      command=lambda: _browse_file(self._input_var, self)).grid(
+                      command=lambda: _browse_file(
+                          self._input_var, self, self._output_var, "converted"
+                      )).grid(
             row=0, column=2, padx=(6, 3), pady=5)
         ctk.CTkButton(paths, text="Folder…", width=70,
-                      command=lambda: _browse_folder(self._input_var, self)).grid(
+                      command=lambda: _browse_folder(
+                          self._input_var, self, self._output_var, "converted"
+                      )).grid(
             row=0, column=3, padx=(3, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
@@ -575,10 +579,14 @@ class UpscaleTab(ctk.CTkFrame):
         ctk.CTkEntry(paths, textvariable=self._input_var).grid(
             row=0, column=1, sticky="ew", pady=5)
         ctk.CTkButton(paths, text="File…", width=65,
-                      command=lambda: _browse_file(self._input_var, self)).grid(
+                      command=lambda: _browse_file(
+                          self._input_var, self, self._output_var, "upscaled"
+                      )).grid(
             row=0, column=2, padx=(6, 3), pady=5)
         ctk.CTkButton(paths, text="Folder…", width=70,
-                      command=lambda: _browse_folder(self._input_var, self)).grid(
+                      command=lambda: _browse_folder(
+                          self._input_var, self, self._output_var, "upscaled"
+                      )).grid(
             row=0, column=3, padx=(3, 8), pady=5)
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
