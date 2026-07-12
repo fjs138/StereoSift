@@ -1053,7 +1053,7 @@ class JudgeTab(ctk.CTkFrame):
         # Info label
         ctk.CTkLabel(
             opts,
-            text="YOLO pose catches obvious duplicate heads/torsos. The optional vision backend can use oMLX or LM Studio for a stronger second opinion.",
+            text="YOLO pose catches obvious structural artifacts. The optional vision backend can use oMLX or LM Studio for a stronger second opinion.",
             text_color="#aaa", font=ctk.CTkFont(size=11), anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 2))
 
@@ -1103,7 +1103,7 @@ class JudgeTab(ctk.CTkFrame):
         self._deep_scan_var = ctk.BooleanVar(value=False)
         self._deep_scan_chk = ctk.CTkCheckBox(
             opts,
-            text="Optional moondream2 fallback — warning on suspect structure, fail only on clear duplicates",
+            text="Optional moondream2 fallback — warning on suspect structural artifacts, fail only on clear structural errors",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
         )

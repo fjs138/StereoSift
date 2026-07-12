@@ -10,16 +10,28 @@
   Local desktop toolkit for 2D-to-3D conversion, AI upscaling, image QC, and vision-assisted folder organization.
 </p>
 
+<p align="center">
+  Offline-first desktop workflow for rendered images, photo batches, archive scans, and AI-assisted image review.
+</p>
+
 ## Deployment
 
 StereoSift is a local app, so there is no hosted deployment to point at.
 You run it from the repo on your machine.
 
-## The Goal
+## What It Does
 
-I wanted one place to turn flat images and videos into side-by-side 3D, and
-another place to sort image batches into pass, warning, and fail without a lot
-of manual clicking.
+StereoSift bundles a few media-heavy desktop tasks that usually end up spread
+across separate scripts and tools:
+
+* 2D image and video to SBS 3D conversion
+* AI upscaling for headset-ready or high-resolution exports
+* Batch image QC for exposure, structure, and structural artifacts
+* Vision-assisted folder organization with your own label set
+* Local cleanup and filename anonymization before sharing a project
+
+It is designed for local-first workflows where you want a GUI, repeatability,
+and the option to stay fully offline.
 
 ## Technology Stack
 
@@ -31,8 +43,8 @@ of manual clicking.
 | Depth Anything V2 | Image depth | Converts 2D images into SBS 3D |
 | Video Depth Anything | Video depth | Converts videos frame by frame with temporal consistency |
 | Real-ESRGAN x2plus | Image upscaling | Restores detail in tiled x2 passes before an exact target resize |
-| YOLO11n | QC pose gate | Finds people and catches obvious duplicate structure in the QC flow |
-| Moondream2 | QC fallback scan | Checks tricky structure cases when the pose rules are not enough |
+| YOLO11n | QC pose gate | Finds people and catches obvious structural artifacts in the QC flow |
+| Moondream2 | QC fallback scan | Checks tricky structural artifacts when the pose rules are not enough |
 | LM Studio / oMLX | Optional backend | Local vision backend for stronger QC when you want it |
 | requests | HTTP client | Talks to the optional backend |
 | Pillow | Image handling | Loads, resizes, and saves images |
@@ -48,7 +60,7 @@ of manual clicking.
 * Convert 2D videos into SBS 3D.
 * Keep original audio when converting video.
 * Show a GUI for conversion, upscaling, QC, image organization, and sanitizing.
-* Sort QC results into `pass`, `warning`, `fail`, and `violations`.
+* Sort QC results into `pass`, `warning`, `fail`, and a separate safety-review queue.
 * Copy originals by default, and only move files when asked.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
@@ -61,8 +73,9 @@ StereoSift has five main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
-Judge uses pixel checks first, then YOLO for person/object detection, and an
-optional structure fallback when you want a second opinion.
+Judge uses pixel checks first, then YOLO for person/object detection and common
+structural artifacts, with an optional fallback scan when you want a second
+opinion.
 Organize asks an OpenAI-compatible vision model to choose exactly one of your
 category labels for each image, then copies or moves it into that subfolder.
 
@@ -76,6 +89,14 @@ is the safest choice if you want no network-capable behavior at all.
 Sanitize removes local caches, reports, and assistant state
 from a selected folder, and it can also anonymize filenames with short random
 lowercase alphanumeric names while preserving extensions.
+
+## Example Workflows
+
+* Turn a flat photo or short clip into SBS 3D for headset viewing.
+* Upscale a folder of rendered images or product shots to a consistent target size.
+* Triage AI-generated portraits or character images for obvious structural defects.
+* Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
+* Clean a local project folder before handing it to someone else.
 
 ## Structure of Project
 
@@ -123,7 +144,7 @@ Five tabs:
   Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
   4128×2208; a true 7680 px source option is also available.
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
-  person counts, issues, and structure notes when the optional structure scan is on.
+  person counts, issues, and optional structural notes when the fallback scan is on.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
 * Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
@@ -174,7 +195,7 @@ the depth plane sits when you view red-cyan output.
 # Basic: exposure and contrast checks + YOLO person/object detection
 python qc_pipeline.py --input ~/Pictures/to-review --output-dir output/qc
 
-# With structure scan
+# With structural scan
 python qc_pipeline.py --input ~/Pictures/to-review --output-dir output/qc --deep-scan
 
 # Strictness: relaxed | balanced (default) | strict
@@ -196,7 +217,7 @@ structural `PASS` goes into `pass/`. Clear defects, uncertain verdicts,
 malformed responses, and scan failures land in `fail/`, which acts as the
 manual review queue. Backend responses that mention a safety/policy
 violation are routed to `unscored/` instead so they stay separate from
-ordinary structure failures. Exposure and other minor aesthetic issues do not
+ordinary structural failures. Exposure and other minor aesthetic issues do not
 affect the verdict.
 
 ### QC Pipeline Layers
@@ -204,8 +225,8 @@ affect the verdict.
 | Layer | Model | What it catches |
 | :-- | :-- | :-- |
 | Pixel metrics | None | Records exposure and contrast for reference |
-| Pose structure gate | YOLO11n (~6 MB) | Person presence, object count, and obvious duplicate structure |
-| Structure scan | moondream2 fallback (~2 GB) | Tricky fused or duplicated structure when the pose gate is not enough |
+| Pose structure gate | YOLO11n (~6 MB) | Person presence, object count, and obvious duplicate or fused human features |
+| Structural scan | moondream2 fallback (~2 GB) | Tricky structural defects when the pose gate is not enough |
 
 YOLO and moondream2 download automatically on first use. The pose gate runs
 first on person images, and the moondream2 fallback only kicks in after that
@@ -216,7 +237,7 @@ stays local to image decoding and pixel heuristics only.
 
 ### Experimental Qwen Benchmark
 
-`qwen_structure.py` is an isolated structure judge for model evaluation; it is not
+`qwen_structure.py` is an isolated structural defect judge for model evaluation; it is not
 part of the production routing policy. It can run either against a local
 Qwen-VL checkpoint in the Hugging Face cache or against an OpenAI-compatible
 vision backend such as oMLX. For the local offline path, once the default
@@ -245,7 +266,7 @@ point the Judge tab at it.
 The full `/v1/chat/completions` URL is also accepted. If authentication is on,
 paste the Bearer token into the API key field or pass it with `--api-key`.
 
-The standalone Qwen structure judge also accepts the same backend URL pattern,
+The standalone Qwen judge also accepts the same backend URL pattern,
 which makes it easy to benchmark the exact vision model you have loaded in
 oMLX.
 
