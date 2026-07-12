@@ -407,7 +407,7 @@ class TestQCModelDecisions(unittest.TestCase):
     @patch("qc_pipeline._http_post")
     def test_backend_uses_openai_multimodal_message_format(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"fail","score":0,"issues":["duplicate torso"]}'
+            '{"status":"fail","score":0,"note":"Two people appear fused at the torso.","issues":["duplicate torso"]}'
         )}}]}
 
         result = classify_image_with_backend(
@@ -430,12 +430,13 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertIn("Use FAIL for severe problems", user_prompt)
         self.assertIn("Use WARNING for minor problems", user_prompt)
         self.assertIn("Use PASS when the body structure looks normal", user_prompt)
+        self.assertIn('"note":"one concise natural-language summary"', user_prompt)
         self.assertNotIn("counting each visible head", user_prompt)
 
     @patch("qc_pipeline._http_post")
-    def test_backend_does_not_write_human_readable_log(self, mock_post):
+    def test_backend_writes_human_readable_log(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"warning","score":50,"issues":["cropped body"]}'
+            '{"status":"warning","score":50,"note":"The body looks mostly fine, but part of the subject is cropped.","issues":["cropped body"]}'
         )}}]}
 
         output_dir = os.path.join(self.tmpdir, "out")
@@ -444,12 +445,18 @@ class TestQCModelDecisions(unittest.TestCase):
             output_dir, model_name="vision-model",
         )
 
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+        self.assertIn("person.png | backend model=vision-model url=http://127.0.0.1:8000/v1", contents)
+        self.assertIn("cropped body", contents)
+        self.assertIn("mostly fine", contents)
 
     @patch("qc_pipeline._http_post")
     def test_backend_uses_parsed_status_as_single_source_of_truth(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"pass","score":95,"issues":["No fused bodies are visible."]}'
+            '{"status":"pass","score":95,"note":"The image appears structurally correct with no obvious problems detected.","issues":["No fused bodies are visible."]}'
         )}}]}
 
         result = classify_image_with_backend(
@@ -459,11 +466,12 @@ class TestQCModelDecisions(unittest.TestCase):
 
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["score"], 95.0)
+        self.assertIn("structurally correct", result["structure_note"])
 
     @patch("qc_pipeline._http_post")
     def test_backend_routes_violation_language_to_violations_folder(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"pass","score":95,"issues":["The image may be a violation of the stated policy."]}'
+            '{"status":"pass","score":95,"note":"The structure looks normal, but the content may violate policy.","issues":["The image may be a violation of the stated policy."]}'
         )}}]}
 
         output_dir = os.path.join(self.tmpdir, "out")
@@ -518,7 +526,12 @@ class TestQCModelDecisions(unittest.TestCase):
 
         self.assertFalse(os.path.exists(os.path.join(output_dir, "outdoors", "person.png")))
         self.assertFalse(os.path.exists(os.path.join(output_dir, "indoors", "person.png")))
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+        self.assertIn("organizer model=vision-model url=http://127.0.0.1:8000/v1", contents)
+        self.assertIn("backend response parse failed", contents)
 
 
 if __name__ == "__main__":

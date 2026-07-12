@@ -15,6 +15,7 @@ Progress and log output stream back to the main thread via a queue.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import platform
 import queue
@@ -23,6 +24,8 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import customtkinter as ctk
 
@@ -37,6 +40,13 @@ STATUS_COLORS = {"pass": "#2ecc71", "warning": "#f39c12", "fail": "#e74c3c"}
 _SIZE_LABELS   = ["Small", "Base", "Large"]
 _IMG_ENCODERS  = {"Small": "vits", "Base": "vitb", "Large": "vitl"}
 _VID_ENCODERS  = {"Small": "vits", "Base": "vitb", "Large": "vitl"}
+_BACKEND_MODEL_CHOICES = [
+    "gemma-3-27b-it-4bit",
+    "gemma-3-27b-it-8bit",
+    "Qwen3.6-35B-A3B-MLX-8bit",
+    "Qwen3.6-35B-A3B-Instruct-MLX-4bit",
+]
+_MODEL_SELECTED_PREFIX = "[Selected] "
 
 
 def _resolve_img_model(size_label: str, device_type: str) -> str:
@@ -254,6 +264,79 @@ def _label_chip_color(label: str) -> str:
     palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#14b8a6"]
     idx = sum(ord(ch) for ch in label.lower()) % len(palette)
     return palette[idx]
+
+
+def _normalize_model_choices(models: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for model in models:
+        candidate = str(model).strip()
+        if not candidate:
+            continue
+        folded = candidate.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        normalized.append(candidate)
+    return normalized
+
+
+def _models_url(backend_url: str) -> str:
+    """Accept a server root, OpenAI base URL, or full models endpoint."""
+    url = backend_url.strip().rstrip("/")
+    if url.endswith("/models"):
+        return url
+    if url.endswith("/chat/completions"):
+        return f"{url[:-len('/chat/completions')]}/models"
+    if url.endswith("/v1"):
+        return f"{url}/models"
+    return f"{url}/v1/models"
+
+
+def _merge_backend_model_choices(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        merged.extend(group)
+    return _normalize_model_choices(merged)
+
+
+def _fetch_backend_model_choices(
+    backend_url: str,
+    api_key: str | None = None,
+    *,
+    timeout: float = 2.5,
+) -> list[str]:
+    """Best-effort model discovery for OpenAI-compatible backends."""
+    url = _models_url(backend_url)
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib_request.Request(url, headers=headers, method="GET")
+    with urllib_request.urlopen(req, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        return []
+    return _normalize_model_choices(
+        item.get("id", "")
+        for item in data
+        if isinstance(item, dict)
+    )
+
+
+def _strip_model_menu_label(value: str) -> str:
+    candidate = str(value).strip()
+    if candidate.startswith(_MODEL_SELECTED_PREFIX):
+        return candidate[len(_MODEL_SELECTED_PREFIX):]
+    return candidate
+
+
+def _decorate_model_menu_values(models: list[str], selected: str) -> list[str]:
+    chosen = _strip_model_menu_label(selected)
+    return [
+        f"{_MODEL_SELECTED_PREFIX}{model}" if model == chosen else model
+        for model in models
+    ]
 
 
 def _progress_display(done: int, total: int) -> tuple[float, int]:
@@ -1006,6 +1089,7 @@ class JudgeTab(ctk.CTkFrame):
         self._run_locked_widgets: list[tk.Widget] = []
         self._results: list[dict] = []
         self._result_row = 1
+        self._backend_models = list(_BACKEND_MODEL_CHOICES)
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._build()
@@ -1049,6 +1133,7 @@ class JudgeTab(ctk.CTkFrame):
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
         opts.grid_columnconfigure(1, weight=1)
+        opts.grid_columnconfigure(3, weight=1)
 
         # Info label
         ctk.CTkLabel(
@@ -1130,6 +1215,7 @@ class JudgeTab(ctk.CTkFrame):
         self._adv_toggle_btn = adv_toggle
 
         self._adv_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        self._adv_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self._adv_frame, text="Backend URL", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=4)
@@ -1138,17 +1224,30 @@ class JudgeTab(ctk.CTkFrame):
             self._adv_frame, textvariable=self._backend_var,
             placeholder_text="oMLX: http://127.0.0.1:8001/v1",
         )
-        self._backend_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
-        self._adv_frame.grid_columnconfigure(1, weight=1)
+        self._backend_entry.grid(
+            row=0, column=1, columnspan=2, sticky="ew", padx=(0, 8), pady=4
+        )
 
         ctk.CTkLabel(self._adv_frame, text="Model name", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._backend_model_var = ctk.StringVar(
-            value="Qwen3.6-35B-A3B-MLX-4bit")
-        self._backend_model_entry = ctk.CTkEntry(self._adv_frame,
-                                                 textvariable=self._backend_model_var)
-        self._backend_model_entry.grid(
-            row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
+        self._backend_model_var = ctk.StringVar(value=self._backend_models[0])
+        self._backend_model_menu = ctk.CTkOptionMenu(
+            self._adv_frame,
+            variable=self._backend_model_var,
+            values=_decorate_model_menu_values(self._backend_models, self._backend_model_var.get()),
+            width=340,
+            command=self._on_backend_model_selected,
+        )
+        self._backend_model_menu.grid(
+            row=1, column=1, sticky="ew", padx=(0, 4), pady=4)
+        self._backend_model_refresh_btn = ctk.CTkButton(
+            self._adv_frame,
+            text="Refresh",
+            width=80,
+            command=lambda: self._refresh_backend_models(show_feedback=True),
+        )
+        self._backend_model_refresh_btn.grid(
+            row=1, column=2, sticky="e", padx=(4, 8), pady=4)
 
         ctk.CTkLabel(self._adv_frame, text="API key", anchor="w").grid(
             row=2, column=0, sticky="w", padx=(8, 6), pady=4)
@@ -1157,12 +1256,15 @@ class JudgeTab(ctk.CTkFrame):
             self._adv_frame, textvariable=self._backend_api_key_var,
             placeholder_text="Optional oMLX/LM Studio Bearer token", show="•",
         )
-        self._backend_api_key_entry.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 8))
+        self._backend_api_key_entry.grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=(0, 8), pady=(4, 8)
+        )
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
             self._output_entry, self._output_browse_btn, self._move_chk,
             self._deep_scan_chk, self._strict_offline_chk, self._adv_toggle_btn,
-            self._backend_entry, self._backend_model_entry, self._backend_api_key_entry,
+            self._backend_entry, self._backend_model_menu, self._backend_model_refresh_btn,
+            self._backend_api_key_entry,
         ])
 
         self._adv_visible = False
@@ -1241,7 +1343,45 @@ class JudgeTab(ctk.CTkFrame):
                                   sticky="ew", padx=4, pady=(0, 6))
             self._adv_toggle_btn.configure(
                 text="▼  Vision backend (optional)")
+            self._refresh_backend_models(show_feedback=False)
         self._adv_visible = not self._adv_visible
+
+    def _set_backend_models(self, models: list[str]) -> None:
+        current = _strip_model_menu_label(self._backend_model_var.get())
+        self._backend_models = _merge_backend_model_choices(models, [current])
+        self._backend_model_menu.configure(
+            values=_decorate_model_menu_values(self._backend_models, current)
+        )
+        self._backend_model_var.set(
+            current if current in self._backend_models else self._backend_models[0]
+        )
+
+    def _on_backend_model_selected(self, choice: str) -> None:
+        selected = _strip_model_menu_label(choice)
+        self._backend_model_var.set(selected)
+        self._backend_model_menu.configure(
+            values=_decorate_model_menu_values(self._backend_models, selected)
+        )
+
+    def _refresh_backend_models(self, *, show_feedback: bool) -> None:
+        backend_url = self._backend_var.get().strip()
+        if not backend_url:
+            if show_feedback:
+                messagebox.showwarning("Missing backend", "Please provide the backend URL first.")
+            return
+        try:
+            discovered = _fetch_backend_model_choices(
+                backend_url,
+                self._backend_api_key_var.get().strip() or None,
+            )
+        except (OSError, ValueError, json.JSONDecodeError, urllib_error.URLError) as exc:
+            if show_feedback:
+                messagebox.showwarning("Model refresh failed", str(exc))
+            return
+        self._set_backend_models(_merge_backend_model_choices(discovered, _BACKEND_MODEL_CHOICES))
+        if show_feedback:
+            source = "backend + built-in list" if discovered else "built-in list"
+            self._log.log(f"Model list refreshed from {source}.")
 
     def _add_result_row(self, result: dict, row_idx: int):
         status = result.get("status", "warning")
@@ -1522,6 +1662,7 @@ class OrganizeTab(ctk.CTkFrame):
         self._labels: list[str] = []
         self._total_items = 0
         self._result_row = 1
+        self._backend_models = list(_BACKEND_MODEL_CHOICES)
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._build()
@@ -1590,23 +1731,40 @@ class OrganizeTab(ctk.CTkFrame):
             opts, textvariable=self._backend_var,
             placeholder_text="oMLX or LM Studio OpenAI-compatible URL",
         )
-        self._backend_entry.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=4)
+        self._backend_entry.grid(
+            row=2, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=4
+        )
 
         ctk.CTkLabel(opts, text="Model name", anchor="w").grid(
-            row=2, column=2, sticky="w", padx=(8, 6), pady=4)
-        self._model_var = ctk.StringVar(value="Qwen3.6-35B-A3B-MLX-4bit")
-        self._model_entry = ctk.CTkEntry(opts, textvariable=self._model_var, width=240)
-        self._model_entry.grid(
-            row=2, column=3, sticky="ew", padx=(0, 8), pady=4)
+            row=3, column=0, sticky="w", padx=(8, 6), pady=4)
+        self._model_var = ctk.StringVar(value=self._backend_models[0])
+        self._model_menu = ctk.CTkOptionMenu(
+            opts,
+            variable=self._model_var,
+            values=_decorate_model_menu_values(self._backend_models, self._model_var.get()),
+            width=340,
+            command=self._on_model_selected,
+        )
+        self._model_menu.grid(
+            row=3, column=1, columnspan=2, sticky="ew", padx=(0, 8), pady=4)
+        self._model_refresh_btn = ctk.CTkButton(
+            opts,
+            text="Refresh",
+            width=80,
+            command=lambda: self._refresh_backend_models(show_feedback=True),
+        )
+        self._model_refresh_btn.grid(row=3, column=3, sticky="e", padx=(0, 8), pady=4)
 
         ctk.CTkLabel(opts, text="API key", anchor="w").grid(
-            row=3, column=0, sticky="w", padx=(8, 6), pady=4)
+            row=4, column=0, sticky="w", padx=(8, 6), pady=4)
         self._api_key_var = ctk.StringVar(value="1234")
         self._api_key_entry = ctk.CTkEntry(
             opts, textvariable=self._api_key_var, show="•",
             placeholder_text="Optional Bearer token",
         )
-        self._api_key_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=4)
+        self._api_key_entry.grid(
+            row=4, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=4
+        )
 
         self._move_var = ctk.BooleanVar(value=False)
         self._move_chk = ctk.CTkCheckBox(
@@ -1615,11 +1773,11 @@ class OrganizeTab(ctk.CTkFrame):
             variable=self._move_var,
             text_color="#e74c3c",
         )
-        self._move_chk.grid(row=3, column=2, columnspan=2, sticky="w", padx=8, pady=4)
+        self._move_chk.grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=4)
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
             self._output_entry, self._output_browse_btn, self._labels_entry,
-            self._backend_entry, self._model_entry, self._api_key_entry,
+            self._backend_entry, self._model_menu, self._model_refresh_btn, self._api_key_entry,
             self._move_chk,
         ])
 
@@ -1628,7 +1786,7 @@ class OrganizeTab(ctk.CTkFrame):
             opts, textvariable=self._summary_var, anchor="w",
             corner_radius=8, fg_color="#232323", text_color="#ddd",
             wraplength=800, justify="left",
-        ).grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 8))
+        ).grid(row=6, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 8))
 
         results_outer = ctk.CTkFrame(self)
         results_outer.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
@@ -1683,6 +1841,42 @@ class OrganizeTab(ctk.CTkFrame):
             fg_color="#444", hover_color="#555",
             command=lambda: _open_folder(self._output_var.get().strip()),
         ).grid(row=0, column=3, padx=(4, 0), sticky="ew")
+        self._refresh_backend_models(show_feedback=False)
+
+    def _set_backend_models(self, models: list[str]) -> None:
+        current = _strip_model_menu_label(self._model_var.get())
+        self._backend_models = _merge_backend_model_choices(models, [current])
+        self._model_menu.configure(
+            values=_decorate_model_menu_values(self._backend_models, current)
+        )
+        self._model_var.set(current if current in self._backend_models else self._backend_models[0])
+
+    def _on_model_selected(self, choice: str) -> None:
+        selected = _strip_model_menu_label(choice)
+        self._model_var.set(selected)
+        self._model_menu.configure(
+            values=_decorate_model_menu_values(self._backend_models, selected)
+        )
+
+    def _refresh_backend_models(self, *, show_feedback: bool) -> None:
+        backend_url = self._backend_var.get().strip()
+        if not backend_url:
+            if show_feedback:
+                messagebox.showwarning("Missing backend", "Please provide the backend URL first.")
+            return
+        try:
+            discovered = _fetch_backend_model_choices(
+                backend_url,
+                self._api_key_var.get().strip() or None,
+            )
+        except (OSError, ValueError, json.JSONDecodeError, urllib_error.URLError) as exc:
+            if show_feedback:
+                messagebox.showwarning("Model refresh failed", str(exc))
+            return
+        self._set_backend_models(_merge_backend_model_choices(discovered, _BACKEND_MODEL_CHOICES))
+        if show_feedback:
+            source = "backend + built-in list" if discovered else "built-in list"
+            self._log.log(f"Model list refreshed from {source}.")
 
     def _run(self):
         if self._running:
@@ -1696,7 +1890,7 @@ class OrganizeTab(ctk.CTkFrame):
             return
         if not backend_url or not model_name:
             messagebox.showwarning(
-                "Missing backend", "Please provide the vision backend URL and model name."
+                "Missing backend", "Please provide the vision backend URL and choose a model."
             )
             return
 

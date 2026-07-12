@@ -15,6 +15,7 @@ sys.modules.setdefault(
         CTkLabel=object,
         CTkButton=object,
         CTkEntry=object,
+        CTkOptionMenu=object,
         CTkCheckBox=object,
         CTkScrollbar=object,
         CTkTabview=object,
@@ -25,11 +26,15 @@ sys.modules.setdefault(
 )
 
 from gui import (
+    _decorate_model_menu_values,
     _OutputAutofillController,
     _browse_file,
     _browse_folder,
+    _merge_backend_model_choices,
+    _models_url,
     _progress_display,
     _split_labels,
+    _strip_model_menu_label,
 )
 
 
@@ -151,6 +156,45 @@ class TestGuiBrowseHelpers(unittest.TestCase):
             _split_labels(" outdoors, indoors\nnight , "),
             ["outdoors", "indoors", "night"],
         )
+
+    def test_models_url_accepts_base_or_chat_endpoint(self):
+        self.assertEqual(_models_url("http://127.0.0.1:8001"), "http://127.0.0.1:8001/v1/models")
+        self.assertEqual(_models_url("http://127.0.0.1:8001/v1"), "http://127.0.0.1:8001/v1/models")
+        self.assertEqual(
+            _models_url("http://127.0.0.1:8001/v1/chat/completions"),
+            "http://127.0.0.1:8001/v1/models",
+        )
+
+    def test_merge_backend_model_choices_preserves_order_and_dedupes(self):
+        merged = _merge_backend_model_choices(
+            ["Qwen3.6-35B-A3B-MLX-4bit", "gemma-3-27b-it-8bit"],
+            ["gemma-3-27b-it-8bit", "custom-model"],
+            ["CUSTOM-model"],
+        )
+
+        self.assertEqual(
+            merged,
+            [
+                "Qwen3.6-35B-A3B-MLX-4bit",
+                "gemma-3-27b-it-8bit",
+                "custom-model",
+            ],
+        )
+
+    def test_decorate_model_menu_values_marks_selected_item_only(self):
+        values = _decorate_model_menu_values(
+            ["model-a", "model-b", "model-c"],
+            "model-b",
+        )
+
+        self.assertEqual(
+            values,
+            ["model-a", "[Selected] model-b", "model-c"],
+        )
+
+    def test_strip_model_menu_label_removes_selected_prefix(self):
+        self.assertEqual(_strip_model_menu_label("[Selected] model-b"), "model-b")
+        self.assertEqual(_strip_model_menu_label("model-a"), "model-a")
 
     def test_progress_display_caps_in_flight_work_at_ninety_nine_percent(self):
         frac, percent = _progress_display(999, 1000)

@@ -416,7 +416,12 @@ def _run_moondream(image_path: str, output_dir: Optional[str] = None) -> Dict[st
     )
     result = model.query(img, prompt)  # type: ignore
     answer: str = result["answer"].strip() if isinstance(result, dict) else str(result).strip()
-    _append_human_readable_response(output_dir, image_path, "moondream2", answer)
+    _append_human_readable_response(
+        output_dir,
+        image_path,
+        f"moondream2 ({_MOONDREAM_REPO} @ {_MOONDREAM_REVISION})",
+        answer,
+    )
 
     verdict = _parse_structure_verdict(answer)
 
@@ -451,22 +456,44 @@ def _append_human_readable_response(
     final_issues: Optional[List[str]] = None,
     final_field: str = "status",
 ) -> None:
-    """Sanitized builds keep backend responses in memory only."""
-    return None
+    """Append a readable model response to a text log for later review."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"[{stamp}] {os.path.basename(image_path)} | {source}\n")
+        fh.write(text.rstrip() + "\n\n")
+        if final_status is not None:
+            fh.write(
+                f"Final verdict: {final_field}={final_status} score="
+                f"{final_score if final_score is not None else 'n/a'}\n"
+            )
+            if final_issues:
+                fh.write(f"Final issues: {' | '.join(final_issues)}\n")
+            fh.write("\n")
 
 
 def _reset_human_readable_log(output_dir: Optional[str]) -> None:
-    """Delete any stale audit log from older runs."""
+    """Start a fresh per-run response log."""
     if not output_dir:
         return
+    os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "model_responses.log")
-    if os.path.exists(log_path):
-        os.unlink(log_path)
+    with open(log_path, "w", encoding="utf-8") as fh:
+        fh.write("")
 
 
 def _append_run_event(output_dir: Optional[str], text: str) -> None:
-    """Sanitized builds do not persist run history."""
-    return None
+    """Append a run-level event to the human-readable log."""
+    if not output_dir:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"[{stamp}] {text}\n")
 
 
 def _remove_stale_audit_artifacts(output_dir: Optional[str]) -> None:
@@ -766,9 +793,10 @@ _QC_RESPONSE_SCHEMA = {
     "properties": {
         "status": {"type": "string", "enum": ["pass", "warning", "fail"]},
         "score": {"type": "number", "minimum": 0, "maximum": 100},
+        "note": {"type": "string"},
         "issues": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["status", "score", "issues"],
+    "required": ["status", "score", "note", "issues"],
     "additionalProperties": False,
 }
 
@@ -868,7 +896,8 @@ def classify_image_with_backend(
         "Use PASS when the body structure looks normal and no real issue is "
         "detected, and do not be overly picky.\n"
         "Return only JSON: {\"status\":\"pass|warning|fail\","
-        "\"score\":0-100,\"issues\":[\"brief evidence\"]}."
+        "\"score\":0-100,\"note\":\"one concise natural-language summary\","
+        "\"issues\":[\"brief evidence\"]}."
     )
     raw = _http_post(_chat_completions_url(backend_url), {
         "model": model_name,
@@ -909,12 +938,17 @@ def classify_image_with_backend(
         status = parsed.get("status", "warning")
         score = float(parsed.get("score") or
                       (100 if status == "pass" else 65 if status == "warning" else 30))
+        note = str(parsed.get("note") or "").strip()
         issues = parsed.get("issues") or []
     except Exception as exc:
         # Keep the batch moving even if the backend emits malformed JSON.
         status = "warning"
         score = 50.0
+        note = ""
         issues = [f"backend response parse failed: {exc}"]
+
+    if not note:
+        note = " ".join(str(issue) for issue in issues).strip()
 
     issue_text = " ".join(str(issue) for issue in issues)
     route_folder = status
@@ -924,7 +958,7 @@ def classify_image_with_backend(
     _append_human_readable_response(
         output_dir,
         image_path,
-        "backend",
+        f"backend model={model_name} url={backend_url}",
         text,
         final_status=status,
         final_score=round(score, 1),
@@ -947,7 +981,7 @@ def classify_image_with_backend(
         "status":       status,
         "score":        round(score, 1),
         "issues":       issues,
-        "structure_note": text[:200],
+        "structure_note": note or text[:200],
         "route_folder": route_folder,
         "destination":  destination,
     }
@@ -1027,7 +1061,7 @@ def classify_image_with_labels(
         _append_human_readable_response(
             output_dir,
             image_path,
-            "organizer",
+            f"organizer model={model_name} url={backend_url}",
             text,
             final_status="error",
             final_score=0.0,
@@ -1039,7 +1073,7 @@ def classify_image_with_labels(
     _append_human_readable_response(
         output_dir,
         image_path,
-        "organizer",
+        f"organizer model={model_name} url={backend_url}",
         text,
         final_status=label,
         final_score=round(confidence, 1),
@@ -1135,7 +1169,15 @@ def run_qc(
     _remove_stale_audit_artifacts(output_dir)
     _reset_human_readable_log(output_dir)
     started_at = time.perf_counter()
-    _append_run_event(output_dir, f"Run started: qc input={input_path}")
+    run_mode = (
+        f"backend model={model_name} url={backend_url}"
+        if backend_url and not settings.strict_offline
+        else (
+            f"local deep_scan={settings.use_deep_scan} "
+            f"strict_offline={settings.strict_offline} yolo={settings.use_yolo}"
+        )
+    )
+    _append_run_event(output_dir, f"Run started: qc input={input_path} mode={run_mode}")
     images = collect_images(input_path)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
@@ -1182,7 +1224,8 @@ def run_organize(
     started_at = time.perf_counter()
     _append_run_event(
         output_dir,
-        f"Run started: organize input={input_path} labels={', '.join(clean_labels)}",
+        f"Run started: organize input={input_path} labels={', '.join(clean_labels)} "
+        f"model={model_name} url={backend_url}",
     )
     images = collect_images(input_path)
     if not images:

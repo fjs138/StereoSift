@@ -31,7 +31,7 @@ class TestQCPipeline(unittest.TestCase):
         images = collect_images(self.input_dir)
         self.assertEqual(len(images), 2)
 
-    def test_run_qc_creates_sorted_folders_without_audit_files(self):
+    def test_run_qc_creates_sorted_folders_and_response_log(self):
         output_dir = os.path.join(self.tmpdir, "out")
         results = run_qc(
             self.input_dir,
@@ -44,7 +44,12 @@ class TestQCPipeline(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(output_dir, "pass")))
         self.assertTrue(os.path.exists(os.path.join(output_dir, "fail")))
         self.assertFalse(os.path.exists(os.path.join(output_dir, "report.json")))
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+        self.assertIn("Run started: qc input=", contents)
+        self.assertIn("mode=local deep_scan=False strict_offline=False yolo=False", contents)
 
     def test_run_qc_removes_stale_audit_files(self):
         output_dir = os.path.join(self.tmpdir, "out")
@@ -60,7 +65,12 @@ class TestQCPipeline(unittest.TestCase):
         )
 
         self.assertTrue(os.path.exists(os.path.join(output_dir, "report.json")))
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+        self.assertNotIn("stale", contents)
+        self.assertIn("Run finished: qc images=2", contents)
 
     def test_run_qc_strict_offline_ignores_backend_url(self):
         output_dir = os.path.join(self.tmpdir, "out")
@@ -73,7 +83,10 @@ class TestQCPipeline(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertTrue(all(r["status"] in {"pass", "warning", "fail"} for r in results))
         self.assertFalse(os.path.exists(os.path.join(output_dir, "report.json")))
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
+        log_path = os.path.join(output_dir, "model_responses.log")
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            self.assertIn("mode=local deep_scan=False strict_offline=True yolo=False", handle.read())
 
     def test_rerouting_removes_stale_status_copy(self):
         output_dir = os.path.join(self.tmpdir, "out")
@@ -86,7 +99,7 @@ class TestQCPipeline(unittest.TestCase):
         self.assertFalse(os.path.exists(old))
         self.assertTrue(os.path.exists(new))
 
-    def test_reset_human_readable_log_deletes_previous_file(self):
+    def test_reset_human_readable_log_starts_fresh_empty_file(self):
         output_dir = os.path.join(self.tmpdir, "out")
         os.makedirs(output_dir, exist_ok=True)
         log_path = os.path.join(output_dir, "model_responses.log")
@@ -95,7 +108,9 @@ class TestQCPipeline(unittest.TestCase):
 
         _reset_human_readable_log(output_dir)
 
-        self.assertFalse(os.path.exists(log_path))
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "")
 
     def test_organizer_labels_are_trimmed_and_unique(self):
         self.assertEqual(
