@@ -472,10 +472,9 @@ def _append_run_event(output_dir: Optional[str], text: str) -> None:
 def _remove_stale_audit_artifacts(output_dir: Optional[str]) -> None:
     if not output_dir:
         return
-    for filename in ("model_responses.log", "report.json"):
-        path = os.path.join(output_dir, filename)
-        if os.path.exists(path):
-            os.unlink(path)
+    log_path = os.path.join(output_dir, "model_responses.log")
+    if os.path.exists(log_path):
+        os.unlink(log_path)
 
 
 def _is_strong_structure_defect(note: str) -> bool:

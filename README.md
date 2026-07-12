@@ -73,7 +73,7 @@ local moondream2 scan.
 Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
 is the safest choice if you want no network-capable behavior at all.
 
-Sanitize removes local caches, outputs, reports, and assistant state
+Sanitize removes local caches, reports, and assistant state
 from a selected folder, and it can also anonymize filenames with short random
 lowercase alphanumeric names while preserving extensions.
 

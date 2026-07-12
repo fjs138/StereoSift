@@ -59,7 +59,7 @@ class TestQCPipeline(unittest.TestCase):
             settings=QCSettings(use_yolo=False, use_deep_scan=False),
         )
 
-        self.assertFalse(os.path.exists(os.path.join(output_dir, "report.json")))
+        self.assertTrue(os.path.exists(os.path.join(output_dir, "report.json")))
         self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
 
     def test_run_qc_strict_offline_ignores_backend_url(self):

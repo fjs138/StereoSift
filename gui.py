@@ -1950,8 +1950,8 @@ class SanitizeTab(ctk.CTkFrame):
         ctk.CTkLabel(
             cleanup,
             text=(
-                "Removes local assistant state, inputs, outputs, caches, .DS_Store files, "
-                "compiled Python files, reports, and audit logs while leaving the runnable "
+                "Removes local assistant state, caches, .DS_Store files, compiled Python "
+                "files, reports, and audit logs while leaving your media, outputs, runnable "
                 "environment and downloaded models alone."
             ),
             text_color="#aaa",
