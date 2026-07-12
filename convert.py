@@ -183,30 +183,41 @@ def convert_one(
     output_format="sbs",   # "sbs", "anaglyph", or "both"
     convergence=0.5,
     log=print,
+    control=None,
 ):
     name, ext = os.path.splitext(os.path.basename(image_path))
 
+    if control:
+        control()
     try:
         image = Image.open(image_path)
     except Exception as e:
         log(f"Skipping {name}{ext} (could not open): {e}")
         return False
 
+    if control:
+        control()
     depth_map = infer_depth(model, image, device, dtype, is_metric, depth_input_scale, log=log)
 
     os.makedirs(output_dir, exist_ok=True)
 
     if depth_only:
+        if control:
+            control()
         out_path = os.path.join(output_dir, f"{name}_depth{ext}")
         depth_map.save(out_path)
         return True
 
     if output_format in ("sbs", "both"):
+        if control:
+            control()
         sbs_image = make_sbs(image, depth_map, sbs_method, depth_scale,
                              sbs_mode, sbs_blur, device)
         sbs_image.save(os.path.join(output_dir, f"{name}_sbs{ext}"))
 
     if output_format in ("anaglyph", "both"):
+        if control:
+            control()
         ana_image = make_anaglyph(image, depth_map, sbs_method, depth_scale,
                                   sbs_blur, convergence, device)
         ana_image.save(os.path.join(output_dir, f"{name}_anaglyph{ext}"))

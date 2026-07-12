@@ -433,7 +433,7 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertNotIn("counting each visible head", user_prompt)
 
     @patch("qc_pipeline._http_post")
-    def test_backend_logs_human_readable_response(self, mock_post):
+    def test_backend_does_not_write_human_readable_log(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
             '{"status":"warning","score":50,"issues":["cropped body"]}'
         )}}]}
@@ -444,13 +444,7 @@ class TestQCModelDecisions(unittest.TestCase):
             output_dir, model_name="vision-model",
         )
 
-        log_path = os.path.join(output_dir, "model_responses.log")
-        self.assertTrue(os.path.exists(log_path))
-        with open(log_path, "r", encoding="utf-8") as handle:
-            log = handle.read()
-        self.assertIn("backend", log)
-        self.assertIn("cropped body", log)
-        self.assertIn("Final verdict: status=warning", log)
+        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
 
     @patch("qc_pipeline._http_post")
     def test_backend_uses_parsed_status_as_single_source_of_truth(self, mock_post):
@@ -524,8 +518,7 @@ class TestQCModelDecisions(unittest.TestCase):
 
         self.assertFalse(os.path.exists(os.path.join(output_dir, "outdoors", "person.png")))
         self.assertFalse(os.path.exists(os.path.join(output_dir, "indoors", "person.png")))
-        with open(os.path.join(output_dir, "model_responses.log"), encoding="utf-8") as handle:
-            self.assertIn("label=error", handle.read())
+        self.assertFalse(os.path.exists(os.path.join(output_dir, "model_responses.log")))
 
 
 if __name__ == "__main__":

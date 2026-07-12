@@ -24,7 +24,13 @@ sys.modules.setdefault(
     ),
 )
 
-from gui import _browse_file, _browse_folder, _progress_display, _split_labels
+from gui import (
+    _OutputAutofillController,
+    _browse_file,
+    _browse_folder,
+    _progress_display,
+    _split_labels,
+)
 
 
 class FakeVar:
@@ -36,6 +42,20 @@ class FakeVar:
 
     def set(self, value):
         self.value = value
+
+
+class FakeTraceVar(FakeVar):
+    def __init__(self, value=""):
+        super().__init__(value)
+        self._callbacks = []
+
+    def trace_add(self, _mode, callback):
+        self._callbacks.append(callback)
+
+    def set(self, value):
+        self.value = value
+        for callback in list(self._callbacks):
+            callback()
 
 
 class TestGuiBrowseHelpers(unittest.TestCase):
@@ -100,6 +120,31 @@ class TestGuiBrowseHelpers(unittest.TestCase):
         _browse_folder(input_var, object(), output_var, "organized")
 
         self.assertEqual(output_var.get(), "/pictures/to-sort-organized")
+
+    def test_output_autofill_replaces_default_output_until_user_overrides(self):
+        input_var = FakeTraceVar()
+        output_var = FakeTraceVar("/workspace/output")
+        _OutputAutofillController(input_var, output_var, "judged")
+
+        input_var.set("/pictures/to-review")
+        self.assertEqual(output_var.get(), "/pictures/to-review-judged")
+
+        output_var.set("/custom/output")
+        input_var.set("/pictures/second")
+        self.assertEqual(output_var.get(), "/custom/output")
+
+    def test_output_autofill_reenables_when_user_returns_to_suggested_path(self):
+        input_var = FakeTraceVar("/pictures/first")
+        output_var = FakeTraceVar("/pictures/first-judged")
+        _OutputAutofillController(input_var, output_var, "judged")
+
+        output_var.set("/custom/output")
+        input_var.set("/pictures/second")
+        self.assertEqual(output_var.get(), "/custom/output")
+
+        output_var.set("/pictures/first-judged")
+        input_var.set("/pictures/third")
+        self.assertEqual(output_var.get(), "/pictures/third-judged")
 
     def test_split_labels_accepts_commas_and_newlines(self):
         self.assertEqual(

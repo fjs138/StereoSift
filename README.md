@@ -47,16 +47,17 @@ of manual clicking.
 * Convert 2D images into SBS 3D.
 * Convert 2D videos into SBS 3D.
 * Keep original audio when converting video.
-* Show a GUI for conversion, upscaling, QC, and image organization.
+* Show a GUI for conversion, upscaling, QC, image organization, and sanitizing.
 * Sort QC results into `pass`, `warning`, `fail`, and `violations`.
 * Copy originals by default, and only move files when asked.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
 * Sort images into arbitrary user-defined categories such as `outdoors, indoors`.
+* Purge local artifacts and anonymize filenames when you need a clean handoff.
 
 ## How It Works
 
-StereoSift has four main paths.
+StereoSift has five main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
@@ -72,6 +73,10 @@ local moondream2 scan.
 Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
 is the safest choice if you want no network-capable behavior at all.
 
+Sanitize removes local caches, outputs, reports, and assistant state
+from a selected folder, and it can also anonymize filenames with short random
+lowercase alphanumeric names while preserving extensions.
+
 ## Structure of Project
 
 | File/Folder | Purpose |
@@ -83,54 +88,10 @@ is the safest choice if you want no network-capable behavior at all.
 | `video_converter.py` | Video Depth Anything streaming and encoding |
 | `sbs/sbs.py` | SBS warping and conversion helpers |
 | `tests/` | Automated tests |
+| `sanitizer.py` | Workspace cleanup and filename anonymizing helpers |
 | `models/` | Downloaded checkpoints |
 | `video_depth_anything_repo/` | Vendored Video Depth Anything code |
 | `depth_anything_v2/` | Depth Anything V2 implementation |
-
-## Current Status
-
-The app is working, but a few edges are still being tuned:
-
-* QC verdicts are being tightened so obvious structure problems do not slip by
-* the optional backend can require an API key, so the GUI needs to make that obvious
-* strict offline mode is in place for peace of mind when you do not want any outbound behavior
-* the new upscaling tab is in place, using Real-ESRGAN x2plus with a Quest 3 preset
-* image upscaling is now a first-class step before SBS conversion when you want cleaner stereo output
-
-That’s basically where it is right now: useful, local-first, and still getting
-cleaned up around QC behavior and model choices.
-
-## Progress Journal
-
-This is the short “what we tried, what stuck, and what did not” log so the
-project history stays visible without digging through code.
-
-| Try | Result | Decision |
-| :-- | :-- | :-- |
-| Depth Anything V2 for image conversion | Works well for stills and keeps the SBS path simple | Kept |
-| Video Depth Anything for video conversion | Better fit for temporal consistency than frame-by-frame image depth | Kept |
-| YOLO11n as the first QC gate | Catches cheap, obvious person-count and structure issues | Kept, but not treated as a full judge |
-| Moondream2 as the fallback scan | Helps with trickier structure cases when YOLO is not enough | Kept as the second-pass check |
-| Qwen3-VL as an structure judge | Useful for isolated benchmarking, but not stable enough to become the production router | Left experimental |
-| Larger local vision backends for Judge | Can produce stronger reasoning, but latency depends heavily on image detail, resize policy, and prompt shape | Kept optional, not the default assumption |
-| Smaller or faster vision model swaps | Often answer quickly, but some collapse into generic "looks fine" outputs unless the prompt is tuned for that model | Treated as model-specific, not plug-and-play |
-| Strict structured JSON responses | Good for automation, but weaker models may minimize explanation and hide uncertainty behind short answers | Kept for routing, but watched carefully during evaluation |
-| More permissive / less over-constrained QC prompts | In several experiments, this produced more useful image-specific reasoning than rigidly over-instructed prompts | Kept as a practical prompt-design lesson |
-| High-detail image requests to local backends | Improves signal in some borderline cases, but often costs more latency than the QC task justifies | Now treated as a tradeoff, not an automatic default |
-| Strict offline mode | Keeps the QC path fully local when you want zero outbound behavior | Kept as a guardrail |
-| Real-ESRGAN x2plus for Quest prep | Gives cleaner pre-SBS upscaling for Quest-oriented images | Kept and exposed as the new Upscale tab |
-
-The main pattern is pretty simple: YOLO is the cheap first pass, Moondream is
-the harder fallback, Qwen stays a benchmark tool for now, and Real-ESRGAN is the
-image-prep step when you want to feed SBS cleaner source material.
-
-Some extra lessons from the QC experiments:
-
-* Swapping only the model name was rarely enough. Different local vision models needed different prompt pressure, response constraints, and image detail settings.
-* Faster models were not automatically worse, but they were more likely to default to generic reassurance unless the request clearly forced evidence-based judgments.
-* Very large context or token ceilings were usually not the main bottleneck for Judge. Model size, image preprocessing, and per-image visual detail had a bigger effect on throughput.
-* For this project, the best practical results usually came from combining cheap deterministic gates with a second opinion, instead of asking one model to be perfect at everything.
-* Throughput matters: a local batch tool can be technically accurate and still feel wrong if each image takes too long to review, so latency is treated as part of quality.
 
 ## Installation
 
@@ -154,7 +115,7 @@ or use `--strict-offline` on the CLI.
 python gui.py
 ```
 
-Four tabs:
+Five tabs:
 
 * Convert turns 2D images or videos into SBS 3D. Pick a model size, choose the
   output style, and run it.
@@ -168,11 +129,10 @@ Four tabs:
 * Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
-
-The Organize tab writes every model response to `model_responses.log` as it is
-received and updates `report.json` after every image. Both files can be opened
-while a batch is still running. A failed request is shown as an error, leaves
-that source image untouched, and does not stop the rest of the batch.
+* Sanitize removes local artifacts from a folder while leaving the runnable
+  environment and downloaded models intact, and it can anonymize every file in
+  a folder tree using the shortest lowercase alphanumeric token length that fits
+  your chosen per-folder cap.
 
 ## SBS Conversion
 
@@ -228,8 +188,7 @@ python qc_pipeline.py --input ~/Pictures/to-review --output-dir output/qc --stri
 sh qc.sh
 ```
 
-Results go into `pass/`, `warning/`, `fail/`, `unscored/`, plus a `report.json`
-summary and a `model_responses.log` file with human-readable backend output.
+Results go into `pass/`, `warning/`, `fail/`, and `unscored/`.
 Originals are copied by default. Use `--move` only if you really want destructive sorting.
 
 Local judgment is intentionally conservative. Only an explicit, confident

@@ -162,6 +162,8 @@ cython_debug/
 
 # Logs
 *.log
+model_responses.log
+report.json
 
 # Temporary files
 tmp/
@@ -176,6 +178,9 @@ output/
 *.pt
 models/
 video_depth_anything_repo/checkpoints/
+.claude/
+.codex/
+.agents/
 
 # Local media and generated results
 input/

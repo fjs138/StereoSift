@@ -125,7 +125,11 @@ def _build_rrdbnet():
     return RRDBNet()
 
 
-def ensure_model(model_dir: str = "models", log: Callable[[str], None] = print) -> str:
+def ensure_model(
+    model_dir: str = "models",
+    log: Callable[[str], None] = print,
+    control: Callable[[], None] | None = None,
+) -> str:
     import requests
     os.makedirs(model_dir, exist_ok=True)
     destination = os.path.join(model_dir, MODEL_NAME)
@@ -133,10 +137,14 @@ def ensure_model(model_dir: str = "models", log: Callable[[str], None] = print) 
         return destination
     partial = destination + ".part"
     log(f"Downloading {MODEL_NAME} (about 67 MB)…")
+    if control:
+        control()
     with requests.get(MODEL_URL, stream=True, timeout=60) as response:
         response.raise_for_status()
         with open(partial, "wb") as fh:
             for chunk in response.iter_content(1024 * 1024):
+                if control:
+                    control()
                 if chunk:
                     fh.write(chunk)
     os.replace(partial, destination)
@@ -169,13 +177,19 @@ class RealESRGANx2:
         result = (output[0].float().cpu().numpy().transpose(1, 2, 0) * 255.0)
         return np.rint(result[:height * 2, :width * 2]).astype(np.uint8)
 
-    def upscale(self, image: Image.Image) -> Image.Image:
+    def upscale(
+        self,
+        image: Image.Image,
+        control: Callable[[], None] | None = None,
+    ) -> Image.Image:
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
         tile, pad = self.tile, 16
         output = np.empty((h * 2, w * 2, 3), dtype=np.uint8)
         for y in range(0, h, tile):
             for x in range(0, w, tile):
+                if control:
+                    control()
                 x0, y0 = max(0, x - pad), max(0, y - pad)
                 x1, y1 = min(w, x + tile + pad), min(h, y + tile + pad)
                 patch = self._infer_tile(rgb[y0:y1, x0:x1])
@@ -190,7 +204,10 @@ class RealESRGANx2:
 def upscale_file(path: str, output_dir: str, upscaler: RealESRGANx2,
                  long_edge: int = 3840, output_format: str = "PNG",
                  log: Callable[[str], None] = print,
-                 target_box: tuple[int, int] | None = None) -> str:
+                 target_box: tuple[int, int] | None = None,
+                 control: Callable[[], None] | None = None) -> str:
+    if control:
+        control()
     with Image.open(path) as source:
         source = ImageOps.exif_transpose(source)
         target = (fit_dimensions(*source.size, *target_box) if target_box
@@ -205,8 +222,10 @@ def upscale_file(path: str, output_dir: str, upscaler: RealESRGANx2,
             passes = max(1, math.ceil(math.log2(max(target[0] / image.width,
                                                      target[1] / image.height))))
             for index in range(passes):
+                if control:
+                    control()
                 log(f"  Real-ESRGAN x2 pass {index + 1}/{passes}")
-                image = upscaler.upscale(image)
+                image = upscaler.upscale(image, control=control)
             if image.size != target:
                 image = image.resize(target, Image.Resampling.LANCZOS)
 

@@ -23,7 +23,7 @@ Pass ``backend_url`` to replace the local moondream2 scan with an API call.
 
 Output
 ------
-``<output_dir>/pass/``, ``warning/``, ``fail/``, ``unscored/``, ``report.json``
+``<output_dir>/pass/``, ``warning/``, ``fail/``, ``unscored/``
 """
 
 from __future__ import annotations
@@ -451,44 +451,31 @@ def _append_human_readable_response(
     final_issues: Optional[List[str]] = None,
     final_field: str = "status",
 ) -> None:
-    """Append a readable model response to a text log for later review."""
-    if not output_dir:
-        return
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, "model_responses.log")
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write(f"[{stamp}] {os.path.basename(image_path)} | {source}\n")
-        fh.write(text.rstrip() + "\n\n")
-        if final_status is not None:
-            fh.write(
-                f"Final verdict: {final_field}={final_status} score="
-                f"{final_score if final_score is not None else 'n/a'}\n"
-            )
-            if final_issues:
-                fh.write(f"Final issues: {' | '.join(final_issues)}\n")
-            fh.write("\n")
+    """Sanitized builds keep backend responses in memory only."""
+    return None
 
 
 def _reset_human_readable_log(output_dir: Optional[str]) -> None:
-    """Start a fresh per-run response log."""
+    """Delete any stale audit log from older runs."""
     if not output_dir:
         return
-    os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "model_responses.log")
-    with open(log_path, "w", encoding="utf-8") as fh:
-        fh.write("")
+    if os.path.exists(log_path):
+        os.unlink(log_path)
 
 
 def _append_run_event(output_dir: Optional[str], text: str) -> None:
-    """Append a run-level event to the human-readable log."""
+    """Sanitized builds do not persist run history."""
+    return None
+
+
+def _remove_stale_audit_artifacts(output_dir: Optional[str]) -> None:
     if not output_dir:
         return
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, "model_responses.log")
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write(f"[{stamp}] {text}\n")
+    for filename in ("model_responses.log", "report.json"):
+        path = os.path.join(output_dir, filename)
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 def _is_strong_structure_defect(note: str) -> bool:
@@ -1143,9 +1130,10 @@ def run_qc(
     settings: QCSettings | None = None,
     api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Run QC on all images in ``input_path``, write report.json."""
+    """Run QC on all images in ``input_path``."""
     if settings is None:
         settings = _DEFAULT_SETTINGS
+    _remove_stale_audit_artifacts(output_dir)
     _reset_human_readable_log(output_dir)
     started_at = time.perf_counter()
     _append_run_event(output_dir, f"Run started: qc input={input_path}")
@@ -1164,11 +1152,6 @@ def run_qc(
             r = classify_image(image_path, output_dir,
                                move_files=move_files, settings=settings)
         results.append(r)
-
-    os.makedirs(output_dir, exist_ok=True)
-    report = os.path.join(output_dir, "report.json")
-    with open(report, "w", encoding="utf-8") as fh:
-        json.dump(results, fh, indent=2)
 
     counts = {s: sum(1 for r in results if r["status"] == s)
               for s in ("pass", "warning", "fail")}
@@ -1192,9 +1175,10 @@ def run_organize(
     move_files: bool = False,
     api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Run image organization and write report.json."""
+    """Run image organization without emitting audit artifacts."""
     clean_labels = validate_organizer_labels(labels)
 
+    _remove_stale_audit_artifacts(output_dir)
     _reset_human_readable_log(output_dir)
     started_at = time.perf_counter()
     _append_run_event(
@@ -1217,13 +1201,6 @@ def run_organize(
             api_key=api_key,
         )
         results.append(r)
-
-    os.makedirs(output_dir, exist_ok=True)
-    for label in clean_labels:
-        os.makedirs(os.path.join(output_dir, label), exist_ok=True)
-    report = os.path.join(output_dir, "report.json")
-    with open(report, "w", encoding="utf-8") as fh:
-        json.dump(results, fh, indent=2)
 
     elapsed = time.perf_counter() - started_at
     _append_run_event(

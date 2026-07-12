@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import imageio
@@ -135,6 +136,8 @@ def convert_video_to_sbs(
     input_size: int = 518,
     temporal_smoothing: float = 0.2,
     depth_only: bool = False,
+    log: Callable[[str], None] = print,
+    control: Callable[[], None] | None = None,
     **_ignored,
 ) -> bool:
     """Convert a single video to a side-by-side 3D video.
@@ -177,7 +180,7 @@ def convert_video_to_sbs(
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Could not open video: {video_path}")
+        log(f"Could not open video: {video_path}")
         return False
 
     src_fps    = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -221,11 +224,13 @@ def convert_video_to_sbs(
     src_idx  = 0
     out_idx  = 0
 
-    print(f"Streaming {selected_total or '?'} frames at {width}x{height}, {out_fps:.1f} fps")
+    log(f"Streaming {selected_total or '?'} frames at {width}x{height}, {out_fps:.1f} fps")
 
     try:
         with tqdm(total=selected_total, desc="Depth + SBS", unit="frame") as bar:
             while cap.isOpened():
+                if control:
+                    control()
                 ok, bgr = cap.read()
                 if not ok or (max_len > 0 and out_idx >= max_len):
                     break
@@ -308,8 +313,8 @@ def convert_video_to_sbs(
             raise RuntimeError(result.stderr.strip().splitlines()[-1])
         os.remove(tmp_video)
     except Exception as exc:
-        print(f"Warning: audio/metadata mux failed ({exc}); saving video-only.")
+        log(f"Warning: audio/metadata mux failed ({exc}); saving video-only.")
         os.replace(tmp_video, out_path)
 
-    print(f"Saved: {out_path}")
+    log(f"Saved: {out_path}")
     return out_idx > 0

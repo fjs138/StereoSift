@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """StereoSift — CustomTkinter GUI.
 
-Four tabs:
-  • Convert  — 2D images / videos → SBS 3D
-  • Upscale  — images → Quest-ready high resolution
-  • Judge    — local QC: pass / warning / fail / violations sorting
-  • Organize — vision-model sorting into user-defined folders
+Five tabs:
+  • Convert   — 2D images / videos → SBS 3D
+  • Upscale   — images → Quest-ready high resolution
+  • Judge     — local QC: pass / warning / fail / violations sorting
+  • Organize  — vision-model sorting into user-defined folders
+  • Sanitize  — purge local artifacts and anonymize filenames
 
 All heavy work runs in a background thread so the UI stays responsive.
 Progress and log output stream back to the main thread via a queue.
@@ -47,6 +48,23 @@ def _resolve_img_model(size_label: str, device_type: str) -> str:
 
 # ── shared helpers ────────────────────────────────────────────────────────────
 
+class _RunCancelled(Exception):
+    """Raised when the user cancels a background GUI task."""
+
+
+def _looks_like_file_path(path: str) -> bool:
+    trimmed = path.strip()
+    if not trimmed:
+        return False
+    expanded = os.path.expanduser(trimmed)
+    if os.path.isfile(expanded):
+        return True
+    if os.path.isdir(expanded):
+        return False
+    basename = os.path.basename(trimmed.rstrip(os.sep))
+    return bool(os.path.splitext(basename)[1])
+
+
 def _suggest_output_path(path: str, output_suffix: str, *, is_file: bool) -> str:
     if is_file:
         stem = os.path.splitext(os.path.basename(path))[0]
@@ -55,6 +73,121 @@ def _suggest_output_path(path: str, output_suffix: str, *, is_file: bool) -> str
         os.path.dirname(path),
         f"{os.path.basename(path)}-{output_suffix}",
     )
+
+
+def _update_output_suggestion(
+    output_var: ctk.StringVar | None,
+    previous_input: str,
+    new_input: str,
+    output_suffix: str,
+    *,
+    previous_is_file: bool | None = None,
+    new_is_file: bool | None = None,
+) -> None:
+    if output_var is None or not new_input:
+        return
+    current_output = output_var.get().strip()
+    previous_suggestion = (
+        _suggest_output_path(
+            previous_input,
+            output_suffix,
+            is_file=(
+                _looks_like_file_path(previous_input)
+                if previous_is_file is None
+                else previous_is_file
+            ),
+        )
+        if previous_input
+        else ""
+    )
+    if not current_output or current_output == previous_suggestion:
+        output_var.set(
+            _suggest_output_path(
+                new_input,
+                output_suffix,
+                is_file=(
+                    _looks_like_file_path(new_input)
+                    if new_is_file is None
+                    else new_is_file
+                ),
+            )
+        )
+
+
+class _OutputAutofillController:
+    """Keep the output path aligned with the input until the user overrides it."""
+
+    def __init__(
+        self,
+        input_var: ctk.StringVar,
+        output_var: ctk.StringVar,
+        output_suffix: str,
+    ) -> None:
+        self._input_var = input_var
+        self._output_var = output_var
+        self._output_suffix = output_suffix
+        self._last_input = input_var.get().strip()
+        self._last_suggestion = output_var.get().strip()
+        self._auto_enabled = True
+        self._setting_output = False
+        self._input_var.trace_add("write", self._on_input_change)
+        self._output_var.trace_add("write", self._on_output_change)
+
+    def _on_input_change(self, *_args) -> None:
+        new_input = self._input_var.get().strip()
+        if new_input == self._last_input:
+            return
+        current_output = self._output_var.get().strip()
+        should_update = (
+            self._auto_enabled
+            or not current_output
+            or current_output == self._last_suggestion
+        )
+        if should_update and new_input:
+            self._setting_output = True
+            try:
+                suggestion = _suggest_output_path(
+                    new_input,
+                    self._output_suffix,
+                    is_file=_looks_like_file_path(new_input),
+                )
+                self._output_var.set(suggestion)
+                self._last_suggestion = suggestion
+            finally:
+                self._setting_output = False
+            self._auto_enabled = True
+        self._last_input = new_input
+
+    def _on_output_change(self, *_args) -> None:
+        if self._setting_output:
+            return
+        current_output = self._output_var.get().strip()
+        self._auto_enabled = not current_output or current_output == self._last_suggestion
+
+
+def _respect_worker_controls(
+    stop_event: threading.Event,
+    pause_event: threading.Event,
+) -> None:
+    while pause_event.is_set():
+        if stop_event.is_set():
+            raise _RunCancelled()
+        time.sleep(0.1)
+    if stop_event.is_set():
+        raise _RunCancelled()
+
+
+def _make_controlled_log(
+    log_queue: queue.Queue,
+    stop_event: threading.Event,
+    pause_event: threading.Event,
+):
+    def _log(text: str) -> None:
+        _respect_worker_controls(stop_event, pause_event)
+        log_queue.put(("log", text))
+        _respect_worker_controls(stop_event, pause_event)
+
+    return _log
 
 
 def _browse_file(
@@ -68,17 +201,14 @@ def _browse_file(
     if path:
         previous_path = var.get().strip()
         var.set(path)
-        if output_var_to_update:
-            current_output = output_var_to_update.get().strip()
-            previous_suggestion = (
-                _suggest_output_path(previous_path, output_suffix, is_file=True)
-                if previous_path
-                else ""
-            )
-            if not current_output or current_output == previous_suggestion:
-                output_var_to_update.set(
-                    _suggest_output_path(path, output_suffix, is_file=True)
-                )
+        _update_output_suggestion(
+            output_var_to_update,
+            previous_path,
+            path,
+            output_suffix,
+            previous_is_file=True,
+            new_is_file=True,
+        )
 
 
 def _browse_folder(
@@ -92,17 +222,14 @@ def _browse_folder(
     if path:
         previous_path = var.get().strip()
         var.set(path)
-        if output_var_to_update:
-            current_output = output_var_to_update.get().strip()
-            previous_suggestion = (
-                _suggest_output_path(previous_path, output_suffix, is_file=False)
-                if previous_path
-                else ""
-            )
-            if not current_output or current_output == previous_suggestion:
-                output_var_to_update.set(
-                    _suggest_output_path(path, output_suffix, is_file=False)
-                )
+        _update_output_suggestion(
+            output_var_to_update,
+            previous_path,
+            path,
+            output_suffix,
+            previous_is_file=False,
+            new_is_file=False,
+        )
 
 
 def _open_folder(path: str) -> None:
@@ -230,10 +357,11 @@ class LogPanel(ctk.CTkFrame):
             self._lbl.configure(text=f"{done} / {total}  ({percent}%)")
         self._update_timer()
 
-    def stop(self) -> None:
+    def stop(self, *, completed: bool = True) -> None:
         self._bar.stop()
         self._bar.configure(mode="determinate")
-        self._bar.set(1)
+        if completed:
+            self._bar.set(1)
         if self._started_at is not None:
             elapsed = time.perf_counter() - self._started_at
             self._timer_lbl.configure(text=f"Elapsed: {self._format_seconds(elapsed)}")
@@ -254,6 +382,9 @@ class ConvertTab(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._run_locked_widgets: list[tk.Widget] = []
         self._build()
         self._poll()
 
@@ -266,28 +397,32 @@ class ConvertTab(ctk.CTkFrame):
         ctk.CTkLabel(paths, text="Input (file or folder)", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
         self._input_var = ctk.StringVar()
-        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
-            row=0, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="File…", width=65,
-                      command=lambda: _browse_file(
-                          self._input_var, self, self._output_var, "converted"
-                      )).grid(
+        self._input_entry = ctk.CTkEntry(paths, textvariable=self._input_var)
+        self._input_entry.grid(row=0, column=1, sticky="ew", pady=5)
+        self._input_file_btn = ctk.CTkButton(paths, text="File…", width=65,
+                                             command=lambda: _browse_file(self._input_var, self))
+        self._input_file_btn.grid(
             row=0, column=2, padx=(6, 3), pady=5)
-        ctk.CTkButton(paths, text="Folder…", width=70,
-                      command=lambda: _browse_folder(
-                          self._input_var, self, self._output_var, "converted"
-                      )).grid(
+        self._input_folder_btn = ctk.CTkButton(paths, text="Folder…", width=70,
+                                               command=lambda: _browse_folder(self._input_var, self))
+        self._input_folder_btn.grid(
             row=0, column=3, padx=(3, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
         self._output_var = ctk.StringVar(
             value=os.path.join(os.getcwd(), "output"))
-        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
-            row=1, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="Browse", width=80,
-                      command=lambda: _browse_folder(self._output_var, self)).grid(
+        self._output_entry = ctk.CTkEntry(paths, textvariable=self._output_var)
+        self._output_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        self._output_browse_btn = ctk.CTkButton(paths, text="Browse", width=80,
+                                                command=lambda: _browse_folder(self._output_var, self))
+        self._output_browse_btn.grid(
             row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+        self._output_autofill = _OutputAutofillController(
+            self._input_var,
+            self._output_var,
+            "converted",
+        )
 
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
@@ -303,15 +438,17 @@ class ConvertTab(ctk.CTkFrame):
 
         # Mode — Images or Video; drives which model label is shown
         self._mode_var = ctk.StringVar(value="Images")
-        ctk.CTkOptionMenu(opts, variable=self._mode_var,
-                          values=["Images", "Video"],
-                          command=self._on_mode_change).grid(
+        self._mode_menu = ctk.CTkOptionMenu(opts, variable=self._mode_var,
+                                            values=["Images", "Video"],
+                                            command=self._on_mode_change)
+        self._mode_menu.grid(
             row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
 
         # Model size picker (Small / Base / Large)
         self._size_var = ctk.StringVar(value="Large")
-        ctk.CTkOptionMenu(opts, variable=self._size_var,
-                          values=_SIZE_LABELS).grid(
+        self._size_menu = ctk.CTkOptionMenu(opts, variable=self._size_var,
+                                            values=_SIZE_LABELS)
+        self._size_menu.grid(
             row=1, column=1, padx=8, pady=(0, 8), sticky="ew")
 
         # Model description label — updates with mode
@@ -330,8 +467,9 @@ class ConvertTab(ctk.CTkFrame):
 
         # Method
         self._method_var = ctk.StringVar(value="mesh_warping")
-        ctk.CTkOptionMenu(opts, variable=self._method_var,
-                          values=["mesh_warping", "grid_sampling"]).grid(
+        self._method_menu = ctk.CTkOptionMenu(opts, variable=self._method_var,
+                                              values=["mesh_warping", "grid_sampling"])
+        self._method_menu.grid(
             row=1, column=3, padx=8, pady=(0, 8), sticky="ew")
 
         # Viewing mode (hidden when anaglyph-only)
@@ -343,16 +481,18 @@ class ConvertTab(ctk.CTkFrame):
 
         # Depth-only checkbox on its own row
         self._depth_only_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="Depth map only",
-                        variable=self._depth_only_var).grid(
+        self._depth_only_chk = ctk.CTkCheckBox(opts, text="Depth map only",
+                                               variable=self._depth_only_var)
+        self._depth_only_chk.grid(
             row=2, column=2, columnspan=3, padx=8, pady=(0, 4), sticky="w")
 
         # Row 3 — sliders
         ctk.CTkLabel(opts, text="3D strength", anchor="w").grid(
             row=3, column=0, padx=8, sticky="w")
         self._depth_scale_var = ctk.IntVar(value=40)
-        ctk.CTkSlider(opts, from_=10, to=100, number_of_steps=90,
-                      variable=self._depth_scale_var).grid(
+        self._depth_scale_slider = ctk.CTkSlider(opts, from_=10, to=100, number_of_steps=90,
+                                                 variable=self._depth_scale_var)
+        self._depth_scale_slider.grid(
             row=4, column=0, columnspan=2, padx=8, sticky="ew", pady=(0, 8))
         self._ds_lbl = ctk.CTkLabel(opts, text="40")
         self._ds_lbl.grid(row=4, column=2, padx=4, sticky="w")
@@ -363,8 +503,9 @@ class ConvertTab(ctk.CTkFrame):
         ctk.CTkLabel(opts, text="Depth blur", anchor="w").grid(
             row=3, column=3, padx=8, sticky="w")
         self._blur_var = ctk.IntVar(value=7)
-        ctk.CTkSlider(opts, from_=3, to=15, number_of_steps=6,
-                      variable=self._blur_var).grid(
+        self._blur_slider = ctk.CTkSlider(opts, from_=3, to=15, number_of_steps=6,
+                                          variable=self._blur_var)
+        self._blur_slider.grid(
             row=4, column=3, padx=8, sticky="ew", pady=(0, 8))
         self._blur_lbl = ctk.CTkLabel(opts, text="7")
         self._blur_lbl.grid(row=4, column=4, padx=4, sticky="w")
@@ -388,6 +529,13 @@ class ConvertTab(ctk.CTkFrame):
         self._conv_var.trace_add(
             "write", lambda *_: self._conv_lbl.configure(
                 text=f"{self._conv_var.get():.2f}"))
+        self._run_locked_widgets.extend([
+            self._input_entry, self._input_file_btn, self._input_folder_btn,
+            self._output_entry, self._output_browse_btn, self._mode_menu,
+            self._size_menu, self._fmt_menu, self._method_menu, self._sbs_mode_menu,
+            self._depth_only_chk, self._depth_scale_slider, self._blur_slider,
+            self._conv_slider,
+        ])
 
         self._on_mode_change("Images")   # set initial labels
         self._on_format_change("sbs")    # hide convergence initially
@@ -397,9 +545,23 @@ class ConvertTab(ctk.CTkFrame):
         self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
         self.grid_rowconfigure(2, weight=1)
 
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
+        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+
         self._run_btn = ctk.CTkButton(
-            self, text="Convert", height=38, command=self._run)
-        self._run_btn.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
+            btn_row, text="Convert", height=38, command=self._run)
+        self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._pause_btn = ctk.CTkButton(
+            btn_row, text="Pause", height=38, command=self._toggle_pause,
+            state="disabled", fg_color="#444", hover_color="#555",
+        )
+        self._pause_btn.grid(row=0, column=1, padx=4, sticky="ew")
+        self._cancel_btn = ctk.CTkButton(
+            btn_row, text="Cancel", height=38, command=self._cancel,
+            state="disabled", fg_color="#cc2222", hover_color="#dd3333",
+        )
+        self._cancel_btn.grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
     def _on_mode_change(self, value: str) -> None:
         if value == "Images":
@@ -438,7 +600,12 @@ class ConvertTab(ctk.CTkFrame):
                                    "Please select an output folder.")
             return
         self._running = True
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._set_run_controls_enabled(False)
         self._run_btn.configure(state="disabled", text="Running…")
+        self._pause_btn.configure(state="normal", text="Pause")
+        self._cancel_btn.configure(state="normal", text="Cancel")
         self._log.clear()
         self._log.start_spin()
         opts = dict(
@@ -454,10 +621,41 @@ class ConvertTab(ctk.CTkFrame):
             output_format=self._output_format_var.get(),
             convergence=round(self._conv_var.get(), 2),
         )
-        threading.Thread(target=self._worker, args=(opts,), daemon=True).start()
+        threading.Thread(
+            target=self._worker,
+            args=(opts, self._stop_event, self._pause_event),
+            daemon=True,
+        ).start()
 
-    def _worker(self, opts: dict):
+    def _toggle_pause(self):
+        if not self._running:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self._pause_btn.configure(text="Pause")
+            self._log.log("Resuming conversion…")
+        else:
+            self._pause_event.set()
+            self._pause_btn.configure(text="Resume")
+            self._log.log("Pausing conversion after the current step…")
+
+    def _cancel(self):
+        if not self._running:
+            return
+        self._stop_event.set()
+        self._cancel_btn.configure(state="disabled", text="Cancelling…")
+        self._pause_btn.configure(state="disabled")
+        self._log.log("Cancelling conversion…")
+
+    def _worker(
+        self,
+        opts: dict,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
         q = self._q
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
+        log = _make_controlled_log(q, stop_event, pause_event)
         try:
             import torch
             from convert import get_device, collect_images, collect_videos, convert_one
@@ -476,6 +674,7 @@ class ConvertTab(ctk.CTkFrame):
                 files = collect_videos(opts["input_path"])
                 q.put(("log", f"Found {len(files)} video(s)"))
                 for i, path in enumerate(files):
+                    control()
                     q.put(("progress", i, len(files)))
                     q.put(("log",
                            f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
@@ -489,7 +688,10 @@ class ConvertTab(ctk.CTkFrame):
                         sbs_mode=opts["sbs_mode"],
                         sbs_blur=opts["sbs_blur"],
                         depth_only=opts["depth_only"],
+                        log=log,
+                        control=control,
                     )
+                    control()
                     q.put(("progress", i + 1, len(files)))
             else:
                 from depth_model import load_depth_model
@@ -500,6 +702,7 @@ class ConvertTab(ctk.CTkFrame):
                 files = collect_images(opts["input_path"])
                 q.put(("log", f"Found {len(files)} image(s)"))
                 for i, path in enumerate(files):
+                    control()
                     q.put(("progress", i, len(files)))
                     q.put(("log",
                            f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
@@ -514,16 +717,25 @@ class ConvertTab(ctk.CTkFrame):
                         sbs_blur=opts["sbs_blur"],
                         output_format=opts["output_format"],
                         convergence=opts["convergence"],
-                        log=lambda msg: q.put(("log", msg)),
+                        log=log,
+                        control=control,
                     )
+                    control()
                     q.put(("progress", i + 1, len(files)))
 
             q.put(("done", f"Finished — {len(files)} file(s) converted."))
+        except _RunCancelled:
+            q.put(("stopped", "Conversion cancelled by user."))
         except Exception:
             import traceback
             tb = traceback.format_exc()
             q.put(("log", tb))
             q.put(("error", tb.splitlines()[-1]))
+
+    def _set_run_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in self._run_locked_widgets:
+            widget.configure(state=state)
 
     def _poll(self):
         try:
@@ -534,15 +746,21 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.log(msg[1])
                 elif kind == "progress":
                     self._log.set_progress(msg[1], msg[2])
-                elif kind == "done":
-                    self._log.stop()
+                elif kind in {"done", "stopped"}:
+                    self._log.stop(completed=kind == "done")
                     self._log.log(msg[1])
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Convert")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._cancel_btn.configure(state="disabled", text="Cancel")
                     self._running = False
                 elif kind == "error":
-                    self._log.stop()
+                    self._log.stop(completed=False)
                     messagebox.showerror("Error", msg[1])
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Convert")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._cancel_btn.configure(state="disabled", text="Cancel")
                     self._running = False
         except queue.Empty:
             pass
@@ -565,6 +783,9 @@ class UpscaleTab(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._run_locked_widgets: list[tk.Widget] = []
         self._build()
         self._poll()
 
@@ -576,25 +797,29 @@ class UpscaleTab(ctk.CTkFrame):
         self._output_var = ctk.StringVar(value=os.path.join(os.getcwd(), "output", "upscaled"))
         ctk.CTkLabel(paths, text="Input (image or folder)", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
-        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
-            row=0, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="File…", width=65,
-                      command=lambda: _browse_file(
-                          self._input_var, self, self._output_var, "upscaled"
-                      )).grid(
+        self._input_entry = ctk.CTkEntry(paths, textvariable=self._input_var)
+        self._input_entry.grid(row=0, column=1, sticky="ew", pady=5)
+        self._input_file_btn = ctk.CTkButton(paths, text="File…", width=65,
+                                             command=lambda: _browse_file(self._input_var, self))
+        self._input_file_btn.grid(
             row=0, column=2, padx=(6, 3), pady=5)
-        ctk.CTkButton(paths, text="Folder…", width=70,
-                      command=lambda: _browse_folder(
-                          self._input_var, self, self._output_var, "upscaled"
-                      )).grid(
+        self._input_folder_btn = ctk.CTkButton(paths, text="Folder…", width=70,
+                                               command=lambda: _browse_folder(self._input_var, self))
+        self._input_folder_btn.grid(
             row=0, column=3, padx=(3, 8), pady=5)
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
-        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
-            row=1, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="Browse", width=80,
-                      command=lambda: _browse_folder(self._output_var, self)).grid(
+        self._output_entry = ctk.CTkEntry(paths, textvariable=self._output_var)
+        self._output_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        self._output_browse_btn = ctk.CTkButton(paths, text="Browse", width=80,
+                                                command=lambda: _browse_folder(self._output_var, self))
+        self._output_browse_btn.grid(
             row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+        self._output_autofill = _OutputAutofillController(
+            self._input_var,
+            self._output_var,
+            "upscaled",
+        )
 
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
@@ -604,16 +829,19 @@ class UpscaleTab(ctk.CTkFrame):
         ctk.CTkLabel(opts, text="Tile size").grid(row=0, column=1, padx=8, pady=(8, 2))
         ctk.CTkLabel(opts, text="Format").grid(row=0, column=2, padx=8, pady=(8, 2))
         self._target_var = ctk.StringVar(value="Quest 3 SBS (2064×2208 per eye)")
-        ctk.CTkOptionMenu(opts, variable=self._target_var,
-                          values=list(self.TARGETS)).grid(
+        self._target_menu = ctk.CTkOptionMenu(opts, variable=self._target_var,
+                                              values=list(self.TARGETS))
+        self._target_menu.grid(
             row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
         self._tile_var = ctk.StringVar(value="256")
-        ctk.CTkOptionMenu(opts, variable=self._tile_var,
-                          values=["128", "256", "384", "512"]).grid(
+        self._tile_menu = ctk.CTkOptionMenu(opts, variable=self._tile_var,
+                                            values=["128", "256", "384", "512"])
+        self._tile_menu.grid(
             row=1, column=1, padx=8, pady=(0, 8), sticky="ew")
         self._format_var = ctk.StringVar(value="PNG")
-        ctk.CTkOptionMenu(opts, variable=self._format_var,
-                          values=["PNG", "JPEG"]).grid(
+        self._format_menu = ctk.CTkOptionMenu(opts, variable=self._format_var,
+                                              values=["PNG", "JPEG"])
+        self._format_menu.grid(
             row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(
             opts,
@@ -621,19 +849,34 @@ class UpscaleTab(ctk.CTkFrame):
                   "producing SBS up to 4128×2208 without stretching or cropping."),
             text_color="#aaa", wraplength=760, justify="left",
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
+        self._run_locked_widgets.extend([
+            self._input_entry, self._input_file_btn, self._input_folder_btn,
+            self._output_entry, self._output_browse_btn,
+            self._target_menu, self._tile_menu, self._format_menu,
+        ])
 
         self._log = LogPanel(self)
         self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
-        buttons.grid_columnconfigure((0, 1), weight=1)
+        buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self._run_btn = ctk.CTkButton(buttons, text="Upscale", height=38,
                                       command=self._run)
         self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._pause_btn = ctk.CTkButton(
+            buttons, text="Pause", height=38, command=self._toggle_pause,
+            state="disabled", fg_color="#444", hover_color="#555",
+        )
+        self._pause_btn.grid(row=0, column=1, padx=4, sticky="ew")
+        self._cancel_btn = ctk.CTkButton(
+            buttons, text="Cancel", height=38, command=self._cancel,
+            state="disabled", fg_color="#cc2222", hover_color="#dd3333",
+        )
+        self._cancel_btn.grid(row=0, column=2, padx=4, sticky="ew")
         ctk.CTkButton(buttons, text="Open output folder", height=38,
                       fg_color="#444", hover_color="#555",
                       command=lambda: _open_folder(self._output_var.get().strip())).grid(
-            row=0, column=1, padx=(4, 0), sticky="ew")
+            row=0, column=3, padx=(4, 0), sticky="ew")
 
     def _run(self):
         if self._running:
@@ -643,38 +886,86 @@ class UpscaleTab(ctk.CTkFrame):
             messagebox.showwarning("Missing path", "Please select input and output paths.")
             return
         self._running = True
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._set_run_controls_enabled(False)
         self._run_btn.configure(state="disabled", text="Upscaling…")
+        self._pause_btn.configure(state="normal", text="Pause")
+        self._cancel_btn.configure(state="normal", text="Cancel")
         self._log.clear()
         self._log.start_spin()
         opts = (inp, out, self.TARGETS[self._target_var.get()],
                 int(self._tile_var.get()), self._format_var.get())
-        threading.Thread(target=self._worker, args=opts, daemon=True).start()
+        threading.Thread(
+            target=self._worker,
+            args=(*opts, self._stop_event, self._pause_event),
+            daemon=True,
+        ).start()
 
-    def _worker(self, inp, out, target, tile, output_format):
+    def _toggle_pause(self):
+        if not self._running:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self._pause_btn.configure(text="Pause")
+            self._log.log("Resuming upscale…")
+        else:
+            self._pause_event.set()
+            self._pause_btn.configure(text="Resume")
+            self._log.log("Pausing upscale after the current step…")
+
+    def _cancel(self):
+        if not self._running:
+            return
+        self._stop_event.set()
+        self._cancel_btn.configure(state="disabled", text="Cancelling…")
+        self._pause_btn.configure(state="disabled")
+        self._log.log("Cancelling upscale…")
+
+    def _worker(
+        self,
+        inp,
+        out,
+        target,
+        tile,
+        output_format,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
+        log = _make_controlled_log(self._q, stop_event, pause_event)
         try:
             from upscaler import collect_images, ensure_model, RealESRGANx2, upscale_file
             files = collect_images(inp)
             if not files:
                 raise ValueError(f"No supported images found in {inp}")
-            log = lambda text: self._q.put(("log", text))
-            model_path = ensure_model(log=log)
+            model_path = ensure_model(log=log, control=control)
             log(f"Loading Real-ESRGAN x2plus (tile {tile})…")
             engine = RealESRGANx2(model_path, tile=tile)
             log(f"Found {len(files)} image(s); device: {engine.device}")
             for index, path in enumerate(files):
+                control()
                 self._q.put(("progress", index, len(files)))
                 log(f"[{index + 1}/{len(files)}] {os.path.basename(path)}")
                 target_box = target if isinstance(target, tuple) else None
                 long_edge = target if isinstance(target, int) else max(target)
                 upscale_file(path, out, engine, long_edge, output_format, log,
-                             target_box=target_box)
+                             target_box=target_box, control=control)
+                control()
                 self._q.put(("progress", index + 1, len(files)))
             self._q.put(("done", f"Finished — {len(files)} image(s) upscaled."))
+        except _RunCancelled:
+            self._q.put(("stopped", "Upscaling cancelled by user."))
         except Exception:
             import traceback
             tb = traceback.format_exc()
             self._q.put(("log", tb))
             self._q.put(("error", tb.splitlines()[-1]))
+
+    def _set_run_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in self._run_locked_widgets:
+            widget.configure(state=state)
 
     def _poll(self):
         try:
@@ -684,13 +975,16 @@ class UpscaleTab(ctk.CTkFrame):
                     self._log.log(msg[1])
                 elif msg[0] == "progress":
                     self._log.set_progress(msg[1], msg[2])
-                elif msg[0] in ("done", "error"):
-                    self._log.stop()
-                    if msg[0] == "done":
+                elif msg[0] in ("done", "stopped", "error"):
+                    self._log.stop(completed=msg[0] == "done")
+                    if msg[0] in ("done", "stopped"):
                         self._log.log(msg[1])
                     else:
                         messagebox.showerror("Upscale error", msg[1])
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Upscale")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._cancel_btn.configure(state="disabled", text="Cancel")
                     self._running = False
         except queue.Empty:
             pass
@@ -709,9 +1003,11 @@ class JudgeTab(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._run_locked_widgets: list[tk.Widget] = []
         self._results: list[dict] = []
         self._result_row = 1
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._build()
         self._poll()
 
@@ -725,23 +1021,29 @@ class JudgeTab(ctk.CTkFrame):
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
         self._input_var = ctk.StringVar()
         self._output_var = ctk.StringVar()
-        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
-            row=0, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="File…", width=65,
-                      command=lambda: _browse_file(
-                          self._input_var, self, self._output_var
-                      )).grid(row=0, column=2, padx=(6, 3), pady=5)
-        ctk.CTkButton(paths, text="Folder…", width=70,
-                      command=lambda: _browse_folder(self._input_var, self, self._output_var)).grid(
+        self._input_entry = ctk.CTkEntry(paths, textvariable=self._input_var)
+        self._input_entry.grid(row=0, column=1, sticky="ew", pady=5)
+        self._input_file_btn = ctk.CTkButton(paths, text="File…", width=65,
+                                             command=lambda: _browse_file(self._input_var, self))
+        self._input_file_btn.grid(row=0, column=2, padx=(6, 3), pady=5)
+        self._input_folder_btn = ctk.CTkButton(paths, text="Folder…", width=70,
+                                               command=lambda: _browse_folder(self._input_var, self))
+        self._input_folder_btn.grid(
             row=0, column=3, padx=(3, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
-        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
-            row=1, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(paths, text="Browse", width=80,
-                      command=lambda: _browse_folder(self._output_var, self)).grid(
+        self._output_entry = ctk.CTkEntry(paths, textvariable=self._output_var)
+        self._output_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        self._output_browse_btn = ctk.CTkButton(paths, text="Browse", width=80,
+                                                command=lambda: _browse_folder(self._output_var, self))
+        self._output_browse_btn.grid(
             row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+        self._output_autofill = _OutputAutofillController(
+            self._input_var,
+            self._output_var,
+            "judged",
+        )
 
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
@@ -789,29 +1091,32 @@ class JudgeTab(ctk.CTkFrame):
 
         # Move vs copy
         self._move_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self._move_chk = ctk.CTkCheckBox(
             opts,
             text="Move originals (destructive — default copies)",
             variable=self._move_var,
             text_color="#e74c3c",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
+        )
+        self._move_chk.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 6))
 
         # Deep scan toggle
         self._deep_scan_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self._deep_scan_chk = ctk.CTkCheckBox(
             opts,
             text="Optional moondream2 fallback — warning on suspect structure, fail only on clear duplicates",
             variable=self._deep_scan_var,
             text_color="#7eb3ff",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+        )
+        self._deep_scan_chk.grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 2))
 
         self._strict_offline_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self._strict_offline_chk = ctk.CTkCheckBox(
             opts,
             text="Offline mode — brightness and contrast only (no models or downloads)",
             variable=self._strict_offline_var,
             text_color="#c7d2fe",
-        ).grid(row=3, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
+        )
+        self._strict_offline_chk.grid(row=3, column=2, columnspan=3, sticky="w", padx=8, pady=(0, 2))
 
         # ── optional backend ──────────────────────────────────────────────────
         adv_toggle = ctk.CTkButton(
@@ -829,27 +1134,36 @@ class JudgeTab(ctk.CTkFrame):
         ctk.CTkLabel(self._adv_frame, text="Backend URL", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=4)
         self._backend_var = ctk.StringVar(value="http://127.0.0.1:8001/v1")
-        ctk.CTkEntry(
+        self._backend_entry = ctk.CTkEntry(
             self._adv_frame, textvariable=self._backend_var,
             placeholder_text="oMLX: http://127.0.0.1:8001/v1",
-        ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
+        )
+        self._backend_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
         self._adv_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self._adv_frame, text="Model name", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=4)
         self._backend_model_var = ctk.StringVar(
             value="Qwen3.6-35B-A3B-MLX-4bit")
-        ctk.CTkEntry(self._adv_frame,
-                     textvariable=self._backend_model_var).grid(
+        self._backend_model_entry = ctk.CTkEntry(self._adv_frame,
+                                                 textvariable=self._backend_model_var)
+        self._backend_model_entry.grid(
             row=1, column=1, sticky="ew", padx=(0, 8), pady=4)
 
         ctk.CTkLabel(self._adv_frame, text="API key", anchor="w").grid(
             row=2, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._backend_api_key_var = ctk.StringVar()
-        ctk.CTkEntry(
+        self._backend_api_key_var = ctk.StringVar(value="1234")
+        self._backend_api_key_entry = ctk.CTkEntry(
             self._adv_frame, textvariable=self._backend_api_key_var,
             placeholder_text="Optional oMLX/LM Studio Bearer token", show="•",
-        ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 8))
+        )
+        self._backend_api_key_entry.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 8))
+        self._run_locked_widgets.extend([
+            self._input_entry, self._input_file_btn, self._input_folder_btn,
+            self._output_entry, self._output_browse_btn, self._move_chk,
+            self._deep_scan_chk, self._strict_offline_chk, self._adv_toggle_btn,
+            self._backend_entry, self._backend_model_entry, self._backend_api_key_entry,
+        ])
 
         self._adv_visible = False
 
@@ -895,21 +1209,27 @@ class JudgeTab(ctk.CTkFrame):
         btn_row.grid_columnconfigure(0, weight=1)
         btn_row.grid_columnconfigure(1, weight=1)
         btn_row.grid_columnconfigure(2, weight=1)
+        btn_row.grid_columnconfigure(3, weight=1)
 
         self._run_btn = ctk.CTkButton(
             btn_row, text="Run QC", height=38, command=self._run)
         self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
+        self._pause_btn = ctk.CTkButton(
+            btn_row, text="Pause", height=38, command=self._toggle_pause, state="disabled",
+            fg_color="#444", hover_color="#555")
+        self._pause_btn.grid(row=0, column=1, padx=(4, 4), sticky="ew")
+
         self._stop_btn = ctk.CTkButton(
-            btn_row, text="Stop QC", height=38, command=self._stop, state="disabled",
+            btn_row, text="Cancel QC", height=38, command=self._cancel, state="disabled",
             fg_color="#cc2222", hover_color="#dd3333")
-        self._stop_btn.grid(row=0, column=1, padx=(4, 4), sticky="ew")
+        self._stop_btn.grid(row=0, column=2, padx=(4, 4), sticky="ew")
 
         ctk.CTkButton(
             btn_row, text="Open output folder", height=38,
             fg_color="#444", hover_color="#555",
             command=lambda: _open_folder(self._output_var.get().strip()),
-        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
+        ).grid(row=0, column=3, padx=(4, 0), sticky="ew")
 
     def _toggle_advanced(self):
         if self._adv_visible:
@@ -984,8 +1304,11 @@ class JudgeTab(ctk.CTkFrame):
 
         self._running = True
         self._stop_event.clear()  # Clear any previous stop signal
+        self._pause_event.clear()
+        self._set_run_controls_enabled(False)
         self._run_btn.configure(state="disabled", text="Running…")
-        self._stop_btn.configure(state="normal") # Enable stop button
+        self._pause_btn.configure(state="normal", text="Pause")
+        self._stop_btn.configure(state="normal", text="Cancel QC")
         self._log.clear()
         self._log.start_spin()
 
@@ -1008,17 +1331,46 @@ class JudgeTab(ctk.CTkFrame):
             deep_scan=self._deep_scan_var.get(),
             strict_offline=self._strict_offline_var.get(),
         )
-        threading.Thread(target=self._worker, args=(opts, self._stop_event,), daemon=True).start()
+        threading.Thread(
+            target=self._worker,
+            args=(opts, self._stop_event, self._pause_event),
+            daemon=True,
+        ).start()
 
-    def _stop(self):
+    def _toggle_pause(self):
+        if not self._running:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self._pause_btn.configure(text="Pause")
+            self._log.log("Resuming QC…")
+        else:
+            self._pause_event.set()
+            self._pause_btn.configure(text="Resume")
+            self._log.log("Pausing QC after the current image…")
+
+    def _cancel(self):
+        if not self._running:
+            return
         self._stop_event.set()
-        self._stop_btn.configure(state="disabled", text="Stopping…")
-        self._run_btn.configure(state="disabled") # Also disable run button while stopping
-        self._log.log("Stopping QC pipeline...")
+        self._stop_btn.configure(state="disabled", text="Cancelling…")
+        self._pause_btn.configure(state="disabled")
+        self._run_btn.configure(state="disabled")
+        self._log.log("Cancelling QC pipeline…")
 
+    def _set_run_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in self._run_locked_widgets:
+            widget.configure(state=state)
 
-    def _worker(self, opts: dict, stop_event: threading.Event):
+    def _worker(
+        self,
+        opts: dict,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
         q = self._q
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
         try:
             import qc_pipeline as qc_module
             qc_module = importlib.reload(qc_module)
@@ -1026,12 +1378,6 @@ class JudgeTab(ctk.CTkFrame):
             classify_image = qc_module.classify_image
             classify_image_with_backend = qc_module.classify_image_with_backend
             QCSettings = qc_module.QCSettings
-            qc_module._reset_human_readable_log(opts["output_dir"])
-            started_at = time.perf_counter()
-            qc_module._append_run_event(
-                opts["output_dir"],
-                f"Run started: qc input={opts['input_path']}",
-            )
 
             images = collect_images(opts["input_path"])
             if not images:
@@ -1061,10 +1407,7 @@ class JudgeTab(ctk.CTkFrame):
             q.put(("log", f"Found {len(images)} image(s)"))
             results = []
             for i, path in enumerate(images):
-                if stop_event.is_set():
-                    q.put(("stopped", "QC pipeline stopped by user."))
-                    return
-
+                control()
                 q.put(("progress", i, len(images)))
                 q.put(("log",
                        f"[{i+1}/{len(images)}] {os.path.basename(path)}"))
@@ -1096,21 +1439,10 @@ class JudgeTab(ctk.CTkFrame):
                 q.put(("result", r))
                 q.put(("progress", i + 1, len(images)))
 
-            import json
-            os.makedirs(opts["output_dir"], exist_ok=True)
-            report = os.path.join(opts["output_dir"], "report.json")
-            with open(report, "w", encoding="utf-8") as fh:
-                json.dump(results, fh, indent=2)
-
             counts = {s: sum(1 for r in results if r["status"] == s)
                       for s in ("pass", "warning", "fail")}
             violations = sum(
                 1 for r in results if r.get("route_folder") == "unscored"
-            )
-            elapsed = time.perf_counter() - started_at
-            qc_module._append_run_event(
-                opts["output_dir"],
-                f"Run finished: qc images={len(results)} elapsed={elapsed:.2f}s",
             )
             q.put(("done",
                    f"Done — {len(results)} images  |  "
@@ -1118,12 +1450,13 @@ class JudgeTab(ctk.CTkFrame):
                    f"⚠ {counts['warning']} warning   "
                    f"✗ {counts['fail']} fail   "
                    f"⛔ {violations} violations"))
+        except _RunCancelled:
+            q.put(("stopped", "QC cancelled by user. Partial results were kept."))
         except Exception:
             import traceback
             tb = traceback.format_exc()
             q.put(("log", tb))
             q.put(("error", tb.splitlines()[-1]))
-
 
     def _poll(self):
         try:
@@ -1147,20 +1480,26 @@ class JudgeTab(ctk.CTkFrame):
                     self._log.stop()
                     self._log.log(msg[1])
                     self._update_summary()
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Run QC")
-                    self._stop_btn.configure(state="disabled", text="Stop QC")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._stop_btn.configure(state="disabled", text="Cancel QC")
                     self._running = False
                 elif kind == "error":
-                    self._log.stop()
+                    self._log.stop(completed=False)
                     messagebox.showerror("Error", msg[1])
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Run QC")
-                    self._stop_btn.configure(state="disabled", text="Stop QC")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._stop_btn.configure(state="disabled", text="Cancel QC")
                     self._running = False
                 elif kind == "stopped":
-                    self._log.stop()
+                    self._log.stop(completed=False)
                     self._log.log(msg[1])
+                    self._set_run_controls_enabled(True)
                     self._run_btn.configure(state="normal", text="Run QC")
-                    self._stop_btn.configure(state="disabled", text="Stop QC")
+                    self._pause_btn.configure(state="disabled", text="Pause")
+                    self._stop_btn.configure(state="disabled", text="Cancel QC")
                     self._running = False
         except queue.Empty:
             pass
@@ -1178,11 +1517,13 @@ class OrganizeTab(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self._q: queue.Queue = queue.Queue()
         self._running = False
+        self._run_locked_widgets: list[tk.Widget] = []
         self._results: list[dict] = []
         self._labels: list[str] = []
         self._total_items = 0
         self._result_row = 1
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._build()
         self._poll()
 
@@ -1195,29 +1536,33 @@ class OrganizeTab(ctk.CTkFrame):
         self._output_var = ctk.StringVar()
         ctk.CTkLabel(paths, text="Input (file or folder)", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
-        ctk.CTkEntry(paths, textvariable=self._input_var).grid(
-            row=0, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(
+        self._input_entry = ctk.CTkEntry(paths, textvariable=self._input_var)
+        self._input_entry.grid(row=0, column=1, sticky="ew", pady=5)
+        self._input_file_btn = ctk.CTkButton(
             paths, text="File…", width=65,
-            command=lambda: _browse_file(
-                self._input_var, self, self._output_var, "organized"
-            ),
-        ).grid(row=0, column=2, padx=(6, 3), pady=5)
-        ctk.CTkButton(
+            command=lambda: _browse_file(self._input_var, self),
+        )
+        self._input_file_btn.grid(row=0, column=2, padx=(6, 3), pady=5)
+        self._input_folder_btn = ctk.CTkButton(
             paths, text="Folder…", width=70,
-            command=lambda: _browse_folder(
-                self._input_var, self, self._output_var, "organized"
-            ),
-        ).grid(row=0, column=3, padx=(3, 8), pady=5)
+            command=lambda: _browse_folder(self._input_var, self),
+        )
+        self._input_folder_btn.grid(row=0, column=3, padx=(3, 8), pady=5)
 
         ctk.CTkLabel(paths, text="Output folder", anchor="w").grid(
             row=1, column=0, sticky="w", padx=(8, 6), pady=5)
-        ctk.CTkEntry(paths, textvariable=self._output_var).grid(
-            row=1, column=1, sticky="ew", pady=5)
-        ctk.CTkButton(
+        self._output_entry = ctk.CTkEntry(paths, textvariable=self._output_var)
+        self._output_entry.grid(row=1, column=1, sticky="ew", pady=5)
+        self._output_browse_btn = ctk.CTkButton(
             paths, text="Browse", width=80,
             command=lambda: _browse_folder(self._output_var, self),
-        ).grid(row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+        )
+        self._output_browse_btn.grid(row=1, column=2, columnspan=2, padx=(6, 8), pady=5)
+        self._output_autofill = _OutputAutofillController(
+            self._input_var,
+            self._output_var,
+            "organized",
+        )
 
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
@@ -1226,11 +1571,12 @@ class OrganizeTab(ctk.CTkFrame):
         ctk.CTkLabel(opts, text="Category labels", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4))
         self._labels_var = ctk.StringVar()
-        ctk.CTkEntry(
+        self._labels_entry = ctk.CTkEntry(
             opts,
             textvariable=self._labels_var,
             placeholder_text="outdoors, indoors  or  color, black-and-white",
-        ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(8, 4))
+        )
+        self._labels_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(8, 4))
         ctk.CTkLabel(
             opts,
             text="Enter two or more comma-separated choices. The model must choose exactly one per image.",
@@ -1240,32 +1586,42 @@ class OrganizeTab(ctk.CTkFrame):
         ctk.CTkLabel(opts, text="Backend URL", anchor="w").grid(
             row=2, column=0, sticky="w", padx=(8, 6), pady=4)
         self._backend_var = ctk.StringVar(value="http://127.0.0.1:8001/v1")
-        ctk.CTkEntry(
+        self._backend_entry = ctk.CTkEntry(
             opts, textvariable=self._backend_var,
             placeholder_text="oMLX or LM Studio OpenAI-compatible URL",
-        ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=4)
+        )
+        self._backend_entry.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=4)
 
         ctk.CTkLabel(opts, text="Model name", anchor="w").grid(
             row=2, column=2, sticky="w", padx=(8, 6), pady=4)
         self._model_var = ctk.StringVar(value="Qwen3.6-35B-A3B-MLX-4bit")
-        ctk.CTkEntry(opts, textvariable=self._model_var, width=240).grid(
+        self._model_entry = ctk.CTkEntry(opts, textvariable=self._model_var, width=240)
+        self._model_entry.grid(
             row=2, column=3, sticky="ew", padx=(0, 8), pady=4)
 
         ctk.CTkLabel(opts, text="API key", anchor="w").grid(
             row=3, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._api_key_var = ctk.StringVar()
-        ctk.CTkEntry(
+        self._api_key_var = ctk.StringVar(value="1234")
+        self._api_key_entry = ctk.CTkEntry(
             opts, textvariable=self._api_key_var, show="•",
             placeholder_text="Optional Bearer token",
-        ).grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=4)
+        )
+        self._api_key_entry.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=4)
 
         self._move_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
+        self._move_chk = ctk.CTkCheckBox(
             opts,
             text="Move originals (destructive — default copies)",
             variable=self._move_var,
             text_color="#e74c3c",
-        ).grid(row=3, column=2, columnspan=2, sticky="w", padx=8, pady=4)
+        )
+        self._move_chk.grid(row=3, column=2, columnspan=2, sticky="w", padx=8, pady=4)
+        self._run_locked_widgets.extend([
+            self._input_entry, self._input_file_btn, self._input_folder_btn,
+            self._output_entry, self._output_browse_btn, self._labels_entry,
+            self._backend_entry, self._model_entry, self._api_key_entry,
+            self._move_chk,
+        ])
 
         self._summary_var = ctk.StringVar(value="Processed: 0  ·  Remaining: 0")
         ctk.CTkLabel(
@@ -1308,20 +1664,25 @@ class OrganizeTab(ctk.CTkFrame):
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="ew")
-        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+        btn_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self._run_btn = ctk.CTkButton(
             btn_row, text="Organize images", height=38, command=self._run)
         self._run_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._pause_btn = ctk.CTkButton(
+            btn_row, text="Pause", height=38, command=self._toggle_pause,
+            state="disabled", fg_color="#444", hover_color="#555",
+        )
+        self._pause_btn.grid(row=0, column=1, padx=4, sticky="ew")
         self._stop_btn = ctk.CTkButton(
-            btn_row, text="Stop", height=38, command=self._stop,
+            btn_row, text="Cancel", height=38, command=self._cancel,
             state="disabled", fg_color="#cc2222", hover_color="#dd3333",
         )
-        self._stop_btn.grid(row=0, column=1, padx=4, sticky="ew")
+        self._stop_btn.grid(row=0, column=2, padx=4, sticky="ew")
         ctk.CTkButton(
             btn_row, text="Open output folder", height=38,
             fg_color="#444", hover_color="#555",
             command=lambda: _open_folder(self._output_var.get().strip()),
-        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
+        ).grid(row=0, column=3, padx=(4, 0), sticky="ew")
 
     def _run(self):
         if self._running:
@@ -1367,9 +1728,12 @@ class OrganizeTab(ctk.CTkFrame):
         self._result_row = 1
         self._update_summary()
         self._stop_event.clear()
+        self._pause_event.clear()
         self._running = True
+        self._set_run_controls_enabled(False)
         self._run_btn.configure(state="disabled", text="Organizing…")
-        self._stop_btn.configure(state="normal", text="Stop")
+        self._pause_btn.configure(state="normal", text="Pause")
+        self._stop_btn.configure(state="normal", text="Cancel")
         self._log.clear()
         self._log.start_spin()
 
@@ -1383,35 +1747,47 @@ class OrganizeTab(ctk.CTkFrame):
             "move_files": self._move_var.get(),
         }
         threading.Thread(
-            target=self._worker, args=(opts, self._stop_event), daemon=True
+            target=self._worker,
+            args=(opts, self._stop_event, self._pause_event),
+            daemon=True,
         ).start()
 
-    def _stop(self):
+    def _toggle_pause(self):
+        if not self._running:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self._pause_btn.configure(text="Pause")
+            self._log.log("Resuming organizer…")
+        else:
+            self._pause_event.set()
+            self._pause_btn.configure(text="Resume")
+            self._log.log("Pausing organizer after the current image…")
+
+    def _cancel(self):
+        if not self._running:
+            return
         self._stop_event.set()
-        self._stop_btn.configure(state="disabled", text="Stopping…")
-        self._log.log("Stopping organizer after the current image...")
+        self._stop_btn.configure(state="disabled", text="Cancelling…")
+        self._pause_btn.configure(state="disabled")
+        self._log.log("Cancelling organizer after the current image…")
 
-    @staticmethod
-    def _write_report(output_dir: str, results: list[dict]) -> None:
-        import json
-        os.makedirs(output_dir, exist_ok=True)
-        report_path = os.path.join(output_dir, "report.json")
-        temporary_path = report_path + ".tmp"
-        with open(temporary_path, "w", encoding="utf-8") as handle:
-            json.dump(results, handle, indent=2)
-        os.replace(temporary_path, report_path)
+    def _set_run_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in self._run_locked_widgets:
+            widget.configure(state=state)
 
-    def _worker(self, opts: dict, stop_event: threading.Event):
+    def _worker(
+        self,
+        opts: dict,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
         q = self._q
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
         try:
             import qc_pipeline as qc_module
             qc_module = importlib.reload(qc_module)
-            qc_module._reset_human_readable_log(opts["output_dir"])
-            started_at = time.perf_counter()
-            qc_module._append_run_event(
-                opts["output_dir"],
-                f"Run started: organize input={opts['input_path']} labels={', '.join(opts['labels'])}",
-            )
             images = qc_module.collect_images(opts["input_path"])
             if not images:
                 raise FileNotFoundError(f"No images found in {opts['input_path']}")
@@ -1419,16 +1795,13 @@ class OrganizeTab(ctk.CTkFrame):
             os.makedirs(opts["output_dir"], exist_ok=True)
             for label in opts["labels"]:
                 os.makedirs(os.path.join(opts["output_dir"], label), exist_ok=True)
-            self._write_report(opts["output_dir"], [])
             q.put(("total", len(images)))
             q.put(("log", f"Found {len(images)} image(s)"))
             q.put(("log", f"Categories: {', '.join(opts['labels'])}"))
 
             results = []
             for index, path in enumerate(images):
-                if stop_event.is_set():
-                    q.put(("stopped", "Organizer stopped by user. Partial report saved."))
-                    return
+                control()
                 q.put(("progress", index, len(images)))
                 q.put(("log", f"[{index + 1}/{len(images)}] {os.path.basename(path)}"))
                 try:
@@ -1453,20 +1826,16 @@ class OrganizeTab(ctk.CTkFrame):
                     }
                     q.put(("log", f"Could not organize {os.path.basename(path)}: {exc}"))
                 results.append(result)
-                self._write_report(opts["output_dir"], results)
                 q.put(("result", result))
                 q.put(("progress", index + 1, len(images)))
 
             errors = sum(1 for result in results if result.get("status") == "error")
-            elapsed = time.perf_counter() - started_at
-            qc_module._append_run_event(
-                opts["output_dir"],
-                f"Run finished: organize images={len(results)} elapsed={elapsed:.2f}s",
-            )
             q.put((
                 "done",
                 f"Done — {len(results)} image(s) processed, {errors} error(s).",
             ))
+        except _RunCancelled:
+            q.put(("stopped", "Organizer cancelled by user."))
         except Exception:
             import traceback
             traceback_text = traceback.format_exc()
@@ -1508,7 +1877,8 @@ class OrganizeTab(ctk.CTkFrame):
 
     def _finish(self):
         self._run_btn.configure(state="normal", text="Organize images")
-        self._stop_btn.configure(state="disabled", text="Stop")
+        self._pause_btn.configure(state="disabled", text="Pause")
+        self._stop_btn.configure(state="disabled", text="Cancel")
         self._running = False
 
     def _poll(self):
@@ -1528,13 +1898,336 @@ class OrganizeTab(ctk.CTkFrame):
                     self._add_result_row(msg[1])
                     self._update_summary()
                 elif kind in {"done", "stopped"}:
-                    self._log.stop()
+                    self._log.stop(completed=kind == "done")
                     self._log.log(msg[1])
                     self._update_summary()
+                    self._set_run_controls_enabled(True)
                     self._finish()
                 elif kind == "error":
-                    self._log.stop()
+                    self._log.stop(completed=False)
                     messagebox.showerror("Organizer error", msg[1])
+                    self._set_run_controls_enabled(True)
+                    self._finish()
+        except queue.Empty:
+            pass
+        self.after(100, self._poll)
+
+
+# ── Sanitize tab ──────────────────────────────────────────────────────────────
+
+class SanitizeTab(ctk.CTkFrame):
+    """Purge local artifacts and anonymize filenames."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self._q: queue.Queue = queue.Queue()
+        self._running = False
+        self._active_task_label = ""
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._run_locked_widgets: list[tk.Widget] = []
+        self._build()
+        self._poll()
+
+    def _build(self):
+        cleanup = ctk.CTkFrame(self)
+        cleanup.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        cleanup.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(cleanup, text="Sanitize folder", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4)
+        )
+        self._cleanup_root_var = ctk.StringVar(value=os.getcwd())
+        self._cleanup_entry = ctk.CTkEntry(cleanup, textvariable=self._cleanup_root_var)
+        self._cleanup_entry.grid(row=0, column=1, sticky="ew", pady=(8, 4))
+        self._cleanup_browse_btn = ctk.CTkButton(
+            cleanup, text="Browse", width=80,
+            command=lambda: _browse_folder(self._cleanup_root_var, self),
+        )
+        self._cleanup_browse_btn.grid(row=0, column=2, padx=(6, 8), pady=(8, 4))
+        ctk.CTkLabel(
+            cleanup,
+            text=(
+                "Removes local assistant state, inputs, outputs, caches, .DS_Store files, "
+                "compiled Python files, reports, and audit logs while leaving the runnable "
+                "environment and downloaded models alone."
+            ),
+            text_color="#aaa",
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
+
+        rename = ctk.CTkFrame(self)
+        rename.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        rename.grid_columnconfigure(1, weight=1)
+        rename.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(rename, text="Anonymize folder", anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4)
+        )
+        self._rename_root_var = ctk.StringVar()
+        self._rename_entry = ctk.CTkEntry(rename, textvariable=self._rename_root_var)
+        self._rename_entry.grid(row=0, column=1, sticky="ew", pady=(8, 4))
+        self._rename_browse_btn = ctk.CTkButton(
+            rename, text="Browse", width=80,
+            command=lambda: _browse_folder(self._rename_root_var, self),
+        )
+        self._rename_browse_btn.grid(row=0, column=2, padx=(6, 8), pady=(8, 4))
+
+        ctk.CTkLabel(rename, text="Max files per folder", anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(8, 6), pady=4
+        )
+        self._max_items_var = ctk.StringVar(value="1000")
+        self._max_items_entry = ctk.CTkEntry(rename, textvariable=self._max_items_var, width=140)
+        self._max_items_entry.grid(row=1, column=1, sticky="w", pady=4)
+        self._recursive_var = ctk.BooleanVar(value=False)
+        self._recursive_chk = ctk.CTkCheckBox(
+            rename,
+            text="Rename files in subfolders too",
+            variable=self._recursive_var,
+        )
+        self._recursive_chk.grid(row=1, column=2, columnspan=2, sticky="w", padx=(8, 8), pady=4)
+
+        self._token_length_var = ctk.StringVar()
+        ctk.CTkLabel(
+            rename,
+            textvariable=self._token_length_var,
+            text_color="#aaa",
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 2))
+        ctk.CTkLabel(
+            rename,
+            text=(
+                "Renames files only, preserves each file extension, and uses lowercase "
+                "letters plus digits."
+            ),
+            text_color="#aaa",
+            wraplength=760,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+        self._max_items_var.trace_add("write", lambda *_: self._update_token_length_label())
+        self._update_token_length_label()
+
+        self._run_locked_widgets.extend([
+            self._cleanup_entry, self._cleanup_browse_btn,
+            self._rename_entry, self._rename_browse_btn,
+            self._max_items_entry, self._recursive_chk,
+        ])
+
+        self._log = LogPanel(self)
+        self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
+        btn_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self._sanitize_btn = ctk.CTkButton(
+            btn_row, text="Sanitize folder", height=38, command=self._run_cleanup
+        )
+        self._sanitize_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self._rename_btn = ctk.CTkButton(
+            btn_row, text="Anonymize files", height=38, command=self._run_anonymize
+        )
+        self._rename_btn.grid(row=0, column=1, padx=4, sticky="ew")
+        self._pause_btn = ctk.CTkButton(
+            btn_row, text="Pause", height=38, command=self._toggle_pause,
+            state="disabled", fg_color="#444", hover_color="#555",
+        )
+        self._pause_btn.grid(row=0, column=2, padx=4, sticky="ew")
+        self._cancel_btn = ctk.CTkButton(
+            btn_row, text="Cancel", height=38, command=self._cancel,
+            state="disabled", fg_color="#cc2222", hover_color="#dd3333",
+        )
+        self._cancel_btn.grid(row=0, column=3, padx=(4, 0), sticky="ew")
+        self._run_locked_widgets.extend([self._sanitize_btn, self._rename_btn])
+
+    def _update_token_length_label(self) -> None:
+        try:
+            from sanitizer import token_length_for_capacity
+
+            max_items = int(self._max_items_var.get().strip())
+            token_length = token_length_for_capacity(max_items)
+            self._token_length_var.set(
+                f"Shortest token length for that cap: {token_length} characters"
+            )
+        except Exception:
+            self._token_length_var.set("Shortest token length for that cap: —")
+
+    def _set_run_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in self._run_locked_widgets:
+            widget.configure(state=state)
+
+    def _start_task(
+        self,
+        *,
+        task_label: str,
+        sanitize_text: str,
+        rename_text: str,
+        target,
+        args: tuple,
+    ) -> None:
+        self._running = True
+        self._active_task_label = task_label
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._set_run_controls_enabled(False)
+        self._sanitize_btn.configure(text=sanitize_text)
+        self._rename_btn.configure(text=rename_text)
+        self._pause_btn.configure(state="normal", text="Pause")
+        self._cancel_btn.configure(state="normal", text="Cancel")
+        self._log.clear()
+        self._log.start_spin()
+        threading.Thread(
+            target=target,
+            args=(*args, self._stop_event, self._pause_event),
+            daemon=True,
+        ).start()
+
+    def _run_cleanup(self):
+        root = self._cleanup_root_var.get().strip()
+        if not root:
+            messagebox.showwarning("Missing folder", "Please choose a folder to sanitize.")
+            return
+        self._start_task(
+            task_label="workspace cleanup",
+            sanitize_text="Sanitizing…",
+            rename_text="Anonymize files",
+            target=self._cleanup_worker,
+            args=(root,),
+        )
+
+    def _run_anonymize(self):
+        root = self._rename_root_var.get().strip()
+        if not root:
+            messagebox.showwarning("Missing folder", "Please choose a folder to anonymize.")
+            return
+        try:
+            max_items = int(self._max_items_var.get().strip())
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid limit", "Max files per folder must be a whole number."
+            )
+            return
+        if max_items <= 0:
+            messagebox.showwarning(
+                "Invalid limit", "Max files per folder must be greater than zero."
+            )
+            return
+        self._start_task(
+            task_label="filename anonymizer",
+            sanitize_text="Sanitize folder",
+            rename_text="Anonymizing…",
+            target=self._rename_worker,
+            args=(root, max_items, self._recursive_var.get()),
+        )
+
+    def _toggle_pause(self):
+        if not self._running:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self._pause_btn.configure(text="Pause")
+            self._log.log(f"Resuming {self._active_task_label}…")
+        else:
+            self._pause_event.set()
+            self._pause_btn.configure(text="Resume")
+            self._log.log(f"Pausing {self._active_task_label} after the current item…")
+
+    def _cancel(self):
+        if not self._running:
+            return
+        self._stop_event.set()
+        self._cancel_btn.configure(state="disabled", text="Cancelling…")
+        self._pause_btn.configure(state="disabled")
+        self._log.log(f"Cancelling {self._active_task_label}…")
+
+    def _cleanup_worker(
+        self,
+        root: str,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
+        log = _make_controlled_log(self._q, stop_event, pause_event)
+        try:
+            import sanitizer as sanitize_module
+
+            sanitize_module = importlib.reload(sanitize_module)
+            summary = sanitize_module.sanitize_workspace(root, log=log, control=control)
+            self._q.put((
+                "done",
+                f"Sanitized {root} — removed {len(summary.removed_paths)} path(s).",
+            ))
+        except _RunCancelled:
+            self._q.put(("stopped", "Workspace cleanup cancelled by user."))
+        except Exception:
+            import traceback
+
+            traceback_text = traceback.format_exc()
+            self._q.put(("log", traceback_text))
+            self._q.put(("error", traceback_text.splitlines()[-1]))
+
+    def _rename_worker(
+        self,
+        root: str,
+        max_items: int,
+        recursive: bool,
+        stop_event: threading.Event,
+        pause_event: threading.Event,
+    ):
+        control = lambda: _respect_worker_controls(stop_event, pause_event)
+        log = _make_controlled_log(self._q, stop_event, pause_event)
+        try:
+            import sanitizer as sanitize_module
+
+            sanitize_module = importlib.reload(sanitize_module)
+            summary = sanitize_module.rename_files_in_tree(
+                root,
+                max_items,
+                recursive=recursive,
+                log=log,
+                control=control,
+            )
+            self._q.put((
+                "done",
+                f"Anonymized {summary.files_renamed} file(s) across "
+                f"{summary.directories_processed} folder(s) using "
+                f"{summary.token_length}-character names.",
+            ))
+        except _RunCancelled:
+            self._q.put(("stopped", "Filename anonymizer cancelled by user."))
+        except Exception:
+            import traceback
+
+            traceback_text = traceback.format_exc()
+            self._q.put(("log", traceback_text))
+            self._q.put(("error", traceback_text.splitlines()[-1]))
+
+    def _finish(self):
+        self._set_run_controls_enabled(True)
+        self._sanitize_btn.configure(text="Sanitize folder")
+        self._rename_btn.configure(text="Anonymize files")
+        self._pause_btn.configure(state="disabled", text="Pause")
+        self._cancel_btn.configure(state="disabled", text="Cancel")
+        self._running = False
+        self._active_task_label = ""
+
+    def _poll(self):
+        try:
+            while True:
+                msg = self._q.get_nowait()
+                kind = msg[0]
+                if kind == "log":
+                    self._log.log(msg[1])
+                elif kind in {"done", "stopped"}:
+                    self._log.stop(completed=kind == "done")
+                    self._log.log(msg[1])
+                    self._finish()
+                elif kind == "error":
+                    self._log.stop(completed=False)
+                    messagebox.showerror("Sanitize error", msg[1])
                     self._finish()
         except queue.Empty:
             pass
@@ -1562,7 +2255,7 @@ class App(ctk.CTk):
             text_color="#7eb3ff",
         ).pack(side="left", padx=16, pady=10)
         ctk.CTkLabel(
-            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC  ·  AI Organize",
+            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC  ·  AI Organize  ·  Sanitize",
             text_color="#666",
         ).pack(side="left", pady=10)
 
@@ -1570,8 +2263,9 @@ class App(ctk.CTk):
         tabs = ctk.CTkTabview(self)
         tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
 
-        for name, cls in [("Convert", ConvertTab), ("Upscale", UpscaleTab),
-                          ("Judge", JudgeTab), ("Organize", OrganizeTab)]:
+        for name, cls in [("Judge", JudgeTab), ("Organize", OrganizeTab),
+                          ("Sanitize", SanitizeTab), ("Upscale", UpscaleTab),
+                          ("Convert", ConvertTab)]:
             tabs.add(name)
             tabs.tab(name).grid_columnconfigure(0, weight=1)
             tabs.tab(name).grid_rowconfigure(0, weight=1)
