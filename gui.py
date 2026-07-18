@@ -696,11 +696,11 @@ class ConvertTab(ctk.CTkFrame):
         for col, text in enumerate(["Video max size", "Depth input", "Output FPS", "Preview"]):
             ctk.CTkLabel(self._video_opts, text=text).grid(
                 row=0, column=col, padx=8, pady=(8, 2))
-        self._video_max_res_var = ctk.StringVar(value="1280")
+        self._video_max_res_var = ctk.StringVar(value="Original")
         self._video_max_res_menu = ctk.CTkOptionMenu(
             self._video_opts,
             variable=self._video_max_res_var,
-            values=["720", "1080", "1280", "Original"],
+            values=["Original", "720", "1080", "1280"],
         )
         self._video_max_res_menu.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
         self._video_input_size_var = ctk.StringVar(value="518")

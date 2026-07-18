@@ -154,8 +154,9 @@ Five tabs:
   4128×2208; a true 7680 px source option is also available.
 * Convert turns 2D images or videos into SBS 3D. It detects whether your chosen
   file/folder contains images or videos and shows the right options. For videos,
-  it exposes max size, depth input size, output FPS, and a first-5-seconds
-  preview before committing to a long clip.
+  it keeps the original resolution by default and exposes optional max size,
+  depth input size, output FPS, and a first-5-seconds preview before committing
+  to a long clip.
 * Tools / Rename is not part of the normal workflow. Cleanup removes local
   assistant/cache/audit artifacts while leaving media, outputs, runnable
   environment, and downloaded models intact. The renamer anonymizes media
@@ -198,8 +199,9 @@ each frame is depth-estimated, converted to left/right SBS, and written directly
 to the output video without loading the whole movie into memory. Video outputs
 use a `_SBS_LR` filename suffix to help Quest video players detect left/right
 SBS mode; if your player still opens it flat, manually choose SBS/left-right
-3D in the player. Use `--max-res`, `--video-input-size`, `--target-fps`, and
-`--max-seconds` to trade quality for speed/memory or make short test previews.
+3D in the player. The GUI keeps the original video resolution by default; use
+`--max-res`, `--video-input-size`, `--target-fps`, and `--max-seconds` to trade
+quality for speed/memory or make short test previews.
 Image model selection follows the same idea through `--model`. Anaglyph output
 currently applies to images, and `--convergence` controls where the depth plane
 sits when you view red-cyan output.
