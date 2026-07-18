@@ -1092,7 +1092,7 @@ class UpscaleTab(ctk.CTkFrame):
         paths.grid_columnconfigure(1, weight=1)
         self._input_var = ctk.StringVar()
         self._output_var = ctk.StringVar(value=os.path.join(os.getcwd(), "output", "upscaled"))
-        ctk.CTkLabel(paths, text="Input (image or folder)", anchor="w").grid(
+        ctk.CTkLabel(paths, text="Input (file or folder)", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=5)
         self._input_entry = ctk.CTkEntry(paths, textvariable=self._input_var)
         self._input_entry.grid(row=0, column=1, sticky="ew", pady=5)
@@ -1117,6 +1117,14 @@ class UpscaleTab(ctk.CTkFrame):
             self._output_var,
             "upscaled",
         )
+        self._input_type_var = ctk.StringVar(value="Pick an input")
+        ctk.CTkLabel(
+            paths,
+            textvariable=self._input_type_var,
+            text_color="#aaa",
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+        self._input_var.trace_add("write", lambda *_: self._refresh_input_type())
 
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
@@ -1142,8 +1150,8 @@ class UpscaleTab(ctk.CTkFrame):
             row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(
             opts,
-            text=("Default fits each eye within the Quest 3 panel's 2064×2208 bounds, "
-                  "producing SBS up to 4128×2208 without stretching or cropping."),
+            text=("Images save as PNG/JPEG. Videos stream frame-by-frame through "
+                  "Real-ESRGAN and keep audio when possible."),
             text_color="#aaa", wraplength=760, justify="left",
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 8))
         self._run_locked_widgets.extend([
@@ -1151,6 +1159,7 @@ class UpscaleTab(ctk.CTkFrame):
             self._output_entry, self._output_browse_btn,
             self._target_menu, self._tile_menu, self._format_menu,
         ])
+        self._refresh_input_type()
 
         self._log = LogPanel(self)
         self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
@@ -1199,6 +1208,27 @@ class UpscaleTab(ctk.CTkFrame):
             daemon=True,
         ).start()
 
+    def _refresh_input_type(self) -> None:
+        kind = _input_kind(self._input_var.get())
+        if kind == "video":
+            self._input_type_var.set("Video detected — will upscale video frames and preserve audio.")
+            self._format_menu.configure(state="disabled")
+        elif kind == "mixed":
+            self._input_type_var.set("Mixed folder — videos selected for upscaling.")
+            self._format_menu.configure(state="disabled")
+        elif kind == "image":
+            self._input_type_var.set("Image detected — will upscale image file(s).")
+            self._format_menu.configure(state="normal")
+        elif kind == "folder":
+            self._input_type_var.set("No supported images/videos found.")
+            self._format_menu.configure(state="normal")
+        elif kind == "missing":
+            self._input_type_var.set("Input not found.")
+            self._format_menu.configure(state="normal")
+        else:
+            self._input_type_var.set("Pick an input")
+            self._format_menu.configure(state="normal")
+
     def _toggle_pause(self):
         if not self._running:
             return
@@ -1232,25 +1262,46 @@ class UpscaleTab(ctk.CTkFrame):
         control = lambda: _respect_worker_controls(stop_event, pause_event)
         log = _make_controlled_log(self._q, stop_event, pause_event)
         try:
-            from upscaler import collect_images, ensure_model, RealESRGANx2, upscale_file
-            files = collect_images(inp)
+            from upscaler import (
+                collect_images,
+                collect_videos,
+                ensure_model,
+                RealESRGANx2,
+                upscale_file,
+                upscale_video,
+            )
+            kind = _input_kind(inp)
+            is_video = kind in {"video", "mixed"}
+            files = collect_videos(inp) if is_video else collect_images(inp)
             if not files:
-                raise ValueError(f"No supported images found in {inp}")
+                raise ValueError(f"No supported {'videos' if is_video else 'images'} found in {inp}")
             model_path = ensure_model(log=log, control=control)
             log(f"Loading Real-ESRGAN x2plus (tile {tile})…")
             engine = RealESRGANx2(model_path, tile=tile)
-            log(f"Found {len(files)} image(s); device: {engine.device}")
+            label = "video" if is_video else "image"
+            log(f"Found {len(files)} {label}(s); device: {engine.device}")
             for index, path in enumerate(files):
                 control()
                 self._q.put(("progress", index, len(files)))
                 log(f"[{index + 1}/{len(files)}] {os.path.basename(path)}")
                 target_box = target if isinstance(target, tuple) else None
                 long_edge = target if isinstance(target, int) else max(target)
-                upscale_file(path, out, engine, long_edge, output_format, log,
-                             target_box=target_box, control=control)
+                if is_video:
+                    upscale_video(
+                        path,
+                        out,
+                        engine,
+                        long_edge,
+                        target_box=target_box,
+                        log=log,
+                        control=control,
+                    )
+                else:
+                    upscale_file(path, out, engine, long_edge, output_format, log,
+                                 target_box=target_box, control=control)
                 control()
                 self._q.put(("progress", index + 1, len(files)))
-            self._q.put(("done", f"Finished — {len(files)} image(s) upscaled."))
+            self._q.put(("done", f"Finished — {len(files)} {label}(s) upscaled."))
         except _RunCancelled:
             self._q.put(("stopped", "Upscaling cancelled by user."))
         except Exception:
@@ -1282,6 +1333,7 @@ class UpscaleTab(ctk.CTkFrame):
                     self._run_btn.configure(state="normal", text="Upscale")
                     self._pause_btn.configure(state="disabled", text="Pause")
                     self._cancel_btn.configure(state="disabled", text="Cancel")
+                    self._refresh_input_type()
                     self._running = False
         except queue.Empty:
             pass

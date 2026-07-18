@@ -6,13 +6,17 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import subprocess
 from pathlib import Path
 from typing import Callable
 
+import cv2
+import imageio
 import numpy as np
 from PIL import Image, ImageOps
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
 MODEL_URL = (
     "https://github.com/xinntao/Real-ESRGAN/releases/download/"
     "v0.2.1/RealESRGAN_x2plus.pth"
@@ -27,6 +31,16 @@ def collect_images(input_path: str) -> list[str]:
     if path.is_dir():
         return [str(p) for p in sorted(path.iterdir())
                 if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+    return []
+
+
+def collect_videos(input_path: str) -> list[str]:
+    path = Path(input_path).expanduser()
+    if path.is_file():
+        return [str(path)] if path.suffix.lower() in VIDEO_EXTENSIONS else []
+    if path.is_dir():
+        return [str(p) for p in sorted(path.iterdir())
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS]
     return []
 
 
@@ -239,9 +253,131 @@ def upscale_file(path: str, output_dir: str, upscaler: RealESRGANx2,
         return destination
 
 
+def upscale_video(
+    path: str,
+    output_dir: str,
+    upscaler: RealESRGANx2,
+    long_edge: int = 3840,
+    *,
+    target_box: tuple[int, int] | None = None,
+    max_seconds: float = -1,
+    log: Callable[[str], None] = print,
+    control: Callable[[], None] | None = None,
+) -> str:
+    """Upscale a video frame-by-frame and preserve the original audio track."""
+    if control:
+        control()
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {path}")
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if src_fps <= 0:
+        src_fps = 25.0
+    src_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    src_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if src_width <= 0 or src_height <= 0:
+        cap.release()
+        raise ValueError(f"Video has invalid dimensions: {path}")
+
+    target = (fit_dimensions(src_width, src_height, *target_box) if target_box
+              else target_dimensions(src_width, src_height, long_edge))
+    out_width = max(2, target[0] - target[0] % 2)
+    out_height = max(2, target[1] - target[1] % 2)
+    frame_limit = None
+    if max_seconds > 0:
+        frame_limit = max(1, math.ceil(max_seconds * src_fps))
+    if frame_limit is not None and src_count > 0:
+        total = min(src_count, frame_limit)
+    else:
+        total = src_count if src_count > 0 else None
+
+    os.makedirs(output_dir, exist_ok=True)
+    destination = os.path.join(output_dir, f"{Path(path).stem}-upscaled{Path(path).suffix}")
+    tmp_video = destination + ".video-only.mp4"
+    log(f"Upscaling video to {out_width}×{out_height} at {src_fps:.1f} fps")
+
+    writer = None
+    frames_written = 0
+    try:
+        writer = imageio.get_writer(
+            tmp_video,
+            fps=src_fps,
+            macro_block_size=1,
+            codec="libx264",
+            ffmpeg_params=["-crf", "18"],
+        )
+        while cap.isOpened():
+            if control:
+                control()
+            if frame_limit is not None and frames_written >= frame_limit:
+                break
+            ok, bgr = cap.read()
+            if not ok:
+                break
+
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(rgb, "RGB")
+            if target == image.size:
+                out_image = image
+            elif target[0] < image.width or target[1] < image.height:
+                out_image = image.resize(target, Image.Resampling.LANCZOS)
+            else:
+                out_image = image
+                passes = max(1, math.ceil(math.log2(max(
+                    target[0] / image.width,
+                    target[1] / image.height,
+                ))))
+                for _ in range(passes):
+                    if control:
+                        control()
+                    out_image = upscaler.upscale(out_image, control=control)
+                if out_image.size != target:
+                    out_image = out_image.resize(target, Image.Resampling.LANCZOS)
+            if out_image.size != (out_width, out_height):
+                out_image = out_image.resize((out_width, out_height), Image.Resampling.LANCZOS)
+            writer.append_data(np.asarray(out_image.convert("RGB"), dtype=np.uint8))
+            frames_written += 1
+            if total:
+                log(f"  frame {frames_written}/{total}")
+    finally:
+        cap.release()
+        if writer is not None:
+            writer.close()
+
+    if frames_written == 0:
+        if os.path.exists(tmp_video):
+            os.remove(tmp_video)
+        raise ValueError(f"No frames were read from video: {path}")
+
+    try:
+        import imageio_ffmpeg
+        result = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(), "-y",
+                "-i", tmp_video, "-i", path,
+                "-map", "0:v:0", "-map", "1:a?",
+                "-c:v", "copy", "-c:a", "aac", "-shortest",
+                destination,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip().splitlines()[-1])
+        os.remove(tmp_video)
+    except Exception as exc:
+        log(f"Warning: audio mux failed ({exc}); saving video-only.")
+        os.replace(tmp_video, destination)
+
+    log(f"Saved {frames_written} frame(s) → {destination}")
+    return destination
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Upscale images with Real-ESRGAN x2plus")
-    parser.add_argument("--input", required=True, help="Image file or folder")
+    parser = argparse.ArgumentParser(description="Upscale images or videos with Real-ESRGAN x2plus")
+    parser.add_argument("--input", required=True, help="Image/video file or folder")
     parser.add_argument("--output-dir", default="output/upscaled")
     parser.add_argument("--long-edge", type=int, default=3840,
                         help="Target long edge (ignored by --quest-3-sbs)")
@@ -249,14 +385,28 @@ def main() -> int:
                         help="Fit each future eye view within 2064x2208")
     parser.add_argument("--tile", type=int, default=256)
     parser.add_argument("--format", choices=("PNG", "JPEG"), default="PNG")
+    parser.add_argument("--max-seconds", type=float, default=-1,
+                        help="For video inputs, process only this many seconds (-1 = full video)")
     args = parser.parse_args()
-    files = collect_images(args.input)
+    video_files = collect_videos(args.input)
+    files = video_files or collect_images(args.input)
     if not files:
-        parser.error("No supported images found")
+        parser.error("No supported images or videos found")
     engine = RealESRGANx2(ensure_model(), tile=args.tile)
+    target_box = (2064, 2208) if args.quest_3_sbs else None
     for path in files:
-        upscale_file(path, args.output_dir, engine, args.long_edge, args.format,
-                     target_box=(2064, 2208) if args.quest_3_sbs else None)
+        if path in video_files:
+            upscale_video(
+                path,
+                args.output_dir,
+                engine,
+                args.long_edge,
+                target_box=target_box,
+                max_seconds=args.max_seconds,
+            )
+        else:
+            upscale_file(path, args.output_dir, engine, args.long_edge, args.format,
+                         target_box=target_box)
     return 0
 
 

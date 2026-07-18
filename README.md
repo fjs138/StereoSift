@@ -72,7 +72,8 @@ and the option to stay fully offline.
 StereoSift has five main paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
-Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing.
+Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing for
+images and frame-by-frame video upscaling.
 Judge uses pixel checks first, then YOLO for person/object detection and common
 structural artifacts, with an optional fallback scan when you want a second
 opinion.
@@ -96,7 +97,7 @@ easier to browse and manage.
 ## Example Workflows
 
 * Turn a flat photo or short clip into SBS 3D for headset viewing.
-* Upscale a folder of rendered images or product shots to a consistent target size.
+* Upscale a folder of rendered images, product shots, or video clips to a consistent target size.
 * Triage AI-generated portraits or character images for obvious structural defects.
 * Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
 * Replace a batch of long, look-alike Draw Things filenames with compact unique names.
@@ -149,9 +150,9 @@ Five tabs:
 * Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
-* Upscale runs tiled Real-ESRGAN x2plus on one image or a folder. Its default
-  Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
-  4128×2208; a true 7680 px source option is also available.
+* Upscale runs tiled Real-ESRGAN x2plus on one image/video or a folder. Images
+  save as PNG/JPEG; videos are upscaled frame-by-frame, re-encoded, and keep
+  audio when possible.
 * Convert turns 2D images or videos into SBS 3D. It detects whether your chosen
   file/folder contains images or videos and shows the right options. For videos,
   it keeps the original resolution by default and exposes optional max size,
@@ -182,15 +183,17 @@ python convert.py --input movie.mp4 --output-dir output --video-encoder vits --m
 sh sbs.sh
 ```
 
-## Image Upscaling
+## Image and Video Upscaling
 
 The x2plus checkpoint downloads to `models/` on first use. Aspect ratio is
-preserved, images already at the target are not enlarged, and tiled inference
-keeps memory use manageable.
+preserved, media already at the target is not enlarged, and tiled inference
+keeps memory use manageable. Video upscaling is much slower than image
+upscaling because every frame is processed separately.
 
 ```bash
 python upscaler.py --input photo.jpg --quest-3-sbs --output-dir output/upscaled
 python upscaler.py --input ~/Pictures/batch --long-edge 7680 --output-dir output/8k
+python upscaler.py --input clip.mp4 --long-edge 3840 --max-seconds 5 --output-dir output/upscaled
 ```
 
 Video encoder choices: `vits` is fast, `vitb` is balanced, and `vitl` is the
