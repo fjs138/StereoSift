@@ -45,9 +45,80 @@ from sbs.sbs import process_image_sbs
 
 _VDA_REPO = Path(__file__).parent / "video_depth_anything_repo"
 _VDA_CHECKPOINTS = _VDA_REPO / "checkpoints"
+_ENCODER_CONFIGS = {
+    "vits": {"encoder": "vits", "features": 64,  "out_channels": [48,  96,  192,  384]},
+    "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96,  192, 384,  768]},
+    "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+}
+_ENCODER_SCALE_LABELS = {"vits": "Small", "vitb": "Base", "vitl": "Large"}
 
 if str(_VDA_REPO) not in sys.path:
     sys.path.insert(0, str(_VDA_REPO))
+
+
+def _checkpoint_name(encoder: str, metric: bool) -> str:
+    if encoder not in _ENCODER_CONFIGS:
+        raise ValueError("encoder must be one of: vits, vitb, vitl")
+    return f"{'metric_' if metric else ''}video_depth_anything_{encoder}.pth"
+
+
+def _reset_streaming_state(model) -> None:
+    """Reset Video Depth Anything's per-video temporal cache.
+
+    ``infer_video_depth_one`` intentionally keeps hidden states from previous
+    frames so a single video has temporal continuity.  That state must not leak
+    into the next file when the GUI processes a folder of videos with one
+    loaded model.
+    """
+    for attr in ("transform", "frame_height", "frame_width"):
+        if hasattr(model, attr):
+            setattr(model, attr, None)
+    if hasattr(model, "frame_id_list"):
+        model.frame_id_list = []
+    if hasattr(model, "frame_cache_list"):
+        model.frame_cache_list = []
+    if hasattr(model, "id"):
+        model.id = -1
+
+
+def _normalise_depth(depth: np.ndarray, *, is_metric: bool) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = np.squeeze(depth)
+    if depth.ndim != 2:
+        raise ValueError(f"depth model returned unsupported shape: {depth.shape}")
+
+    finite = np.isfinite(depth)
+    if not finite.all():
+        depth = np.where(finite, depth, 0.0)
+
+    d_min, d_max = float(depth.min()), float(depth.max())
+    depth = (depth - d_min) / max(d_max - d_min, 1e-6)
+    if is_metric:
+        # Keep metric checkpoints aligned with the image path, where nearer
+        # values become stronger positive disparity for SBS rendering.
+        depth = 1.0 - depth
+    return np.clip(depth, 0.0, 1.0)
+
+
+def _target_resolution(
+    src_width: int,
+    src_height: int,
+    max_res: int,
+) -> tuple[int, int]:
+    if src_width <= 0 or src_height <= 0:
+        raise ValueError("video has invalid dimensions")
+
+    if max_res > 0 and max(src_height, src_width) > max_res:
+        scale = max_res / max(src_height, src_width)
+        width = round(src_width * scale)
+        height = round(src_height * scale)
+    else:
+        width, height = src_width, src_height
+
+    width = max(width - width % 2, 2)
+    height = max(height - height % 2, 2)
+    return width, height
 
 
 # ---------------------------------------------------------------------------
@@ -76,13 +147,13 @@ def load_video_depth_model(
     """
     from video_depth_anything.video_depth_stream import VideoDepthAnything
 
-    checkpoint_name = f"{'metric_' if metric else ''}video_depth_anything_{encoder}.pth"
+    checkpoint_name = _checkpoint_name(encoder, metric)
     checkpoint_path = _VDA_CHECKPOINTS / checkpoint_name
 
     if not checkpoint_path.exists():
         print(f"Downloading Video Depth Anything checkpoint: {checkpoint_name}")
         _VDA_CHECKPOINTS.mkdir(parents=True, exist_ok=True)
-        scale_label = {"vits": "Small", "vitb": "Base", "vitl": "Large"}[encoder]
+        scale_label = _ENCODER_SCALE_LABELS[encoder]
         repo_prefix = "Metric-Video-Depth-Anything" if metric else "Video-Depth-Anything"
         hf_hub_download(
             repo_id=f"depth-anything/{repo_prefix}-{scale_label}",
@@ -91,17 +162,11 @@ def load_video_depth_model(
             local_dir_use_symlinks=False,
         )
 
-    model_configs = {
-        "vits": {"encoder": "vits", "features": 64,  "out_channels": [48,  96,  192,  384]},
-        "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96,  192, 384,  768]},
-        "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
-    }
-
     device = torch.device(device)
     # fp16 on accelerators keeps memory low during temporal window processing.
     dtype = torch.float16 if device.type in ("cuda", "mps") else torch.float32
 
-    model = VideoDepthAnything(**model_configs[encoder])
+    model = VideoDepthAnything(**_ENCODER_CONFIGS[encoder])
     state_dict = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict, strict=True)
     model.to(device=device, dtype=dtype).eval()
@@ -188,45 +253,43 @@ def convert_video_to_sbs(
     src_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_count  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    if src_fps <= 0:
+        log("Could not determine the source frame rate; using 25 fps.")
+        src_fps = 25.0
     out_fps = src_fps if target_fps < 0 else target_fps
     if out_fps <= 0:
         raise ValueError("target_fps must be > 0 or -1.")
     stride = max(round(src_fps / out_fps), 1)
 
     # Compute output resolution — keep even dimensions for the encoder.
-    if max_res > 0 and max(src_height, src_width) > max_res:
-        scale  = max_res / max(src_height, src_width)
-        width  = round(src_width  * scale)
-        height = round(src_height * scale)
-    else:
-        width, height = src_width, src_height
-    width  -= width  % 2
-    height -= height % 2
+    width, height = _target_resolution(src_width, src_height, max_res)
 
     selected_total = (src_count + stride - 1) // stride if src_count > 0 else None
     if max_len > 0 and selected_total is not None:
         selected_total = min(selected_total, max_len)
 
     os.makedirs(output_dir, exist_ok=True)
-    suffix       = "depth" if depth_only else "sbs"
+    suffix       = "depth" if depth_only else "SBS_LR"
     out_path     = os.path.join(output_dir, f"{name}_{suffix}{ext}")
     tmp_video    = out_path + ".video-only.mp4"
 
-    writer = imageio.get_writer(
-        tmp_video,
-        fps=out_fps,
-        macro_block_size=1,
-        codec="libx264",
-        ffmpeg_params=["-crf", "18"],
-    )
+    writer = None
 
     prev_depth:  np.ndarray | None = None
     src_idx  = 0
     out_idx  = 0
 
     log(f"Streaming {selected_total or '?'} frames at {width}x{height}, {out_fps:.1f} fps")
+    _reset_streaming_state(model)
 
     try:
+        writer = imageio.get_writer(
+            tmp_video,
+            fps=out_fps,
+            macro_block_size=1,
+            codec="libx264",
+            ffmpeg_params=["-crf", "18"],
+        )
         with tqdm(total=selected_total, desc="Depth + SBS", unit="frame") as bar:
             while cap.isOpened():
                 if control:
@@ -250,11 +313,10 @@ def convert_video_to_sbs(
                     input_size=input_size,
                     device=device.type,
                     fp32=(dtype == torch.float32),
-                ).astype(np.float32)
-
-                # Normalise to [0, 1].
-                d_min, d_max = float(depth.min()), float(depth.max())
-                depth = (depth - d_min) / max(d_max - d_min, 1e-6)
+                )
+                depth = _normalise_depth(depth, is_metric=is_metric)
+                if depth.shape != (height, width):
+                    depth = cv2.resize(depth, (width, height), interpolation=cv2.INTER_LINEAR)
 
                 # Optional temporal smoothing.
                 if prev_depth is not None and temporal_smoothing > 0:
@@ -286,7 +348,14 @@ def convert_video_to_sbs(
 
     finally:
         cap.release()
-        writer.close()
+        if writer is not None:
+            writer.close()
+
+    if out_idx == 0:
+        if os.path.exists(tmp_video):
+            os.remove(tmp_video)
+        log(f"No frames were written from: {video_path}")
+        return False
 
     # Mux original audio and embed SBS stereo metadata.
     # The stereo_mode flag tells compliant players (Meta Quest, etc.) that

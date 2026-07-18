@@ -445,6 +445,8 @@ def main():
     parser.add_argument("--max-len", type=int, default=-1, help="Max frames to process (-1 = all).")
     parser.add_argument("--target-fps", type=int, default=-1, help="Target FPS (-1 = original).")
     parser.add_argument("--max-res", type=int, default=1280, help="Max resolution dimension.")
+    parser.add_argument("--video-input-size", type=int, default=518,
+                        help="Resolution fed to Video Depth Anything.")
     parser.add_argument("--temporal-smoothing", type=float, default=0.2,
                         help="Temporal smoothing for video (0.0-0.5).")
     parser.add_argument("--batch-size", type=int, default=16, help="Frames per batch.")
@@ -533,6 +535,7 @@ def main():
                         max_len=args.max_len,
                         target_fps=args.target_fps,
                         max_res=args.max_res,
+                        input_size=args.video_input_size,
                         temporal_smoothing=args.temporal_smoothing,
                         batch_size=args.batch_size,
                         depth_only=args.depth_only,

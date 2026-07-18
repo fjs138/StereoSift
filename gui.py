@@ -582,6 +582,7 @@ class ConvertTab(ctk.CTkFrame):
         self._depth_scale_var.trace_add(
             "write", lambda *_: self._ds_lbl.configure(
                 text=str(self._depth_scale_var.get())))
+        self._auto_video_strength_active = False
 
         ctk.CTkLabel(opts, text="Depth blur", anchor="w").grid(
             row=3, column=3, padx=8, sticky="w")
@@ -650,9 +651,21 @@ class ConvertTab(ctk.CTkFrame):
         if value == "Images":
             self._model_lbl.configure(
                 text="DepthAnythingV2 — static image depth model")
+            self._fmt_menu.configure(state="normal")
+            if self._auto_video_strength_active and self._depth_scale_var.get() == 70:
+                self._depth_scale_var.set(40)
+            self._auto_video_strength_active = False
         else:
             self._model_lbl.configure(
                 text="Video Depth Anything — temporal streaming model")
+            # Videos are rendered as Quest-ready left/right SBS.  The red-cyan
+            # anaglyph formatter is image-only, so keep the video path honest.
+            self._output_format_var.set("sbs")
+            self._fmt_menu.configure(state="disabled")
+            if self._depth_scale_var.get() == 40:
+                self._depth_scale_var.set(70)
+                self._auto_video_strength_active = True
+        self._on_format_change(self._output_format_var.get())
 
     def _on_format_change(self, value: str) -> None:
         """Show convergence slider for anaglyph; hide viewing mode for anaglyph-only."""
@@ -756,6 +769,7 @@ class ConvertTab(ctk.CTkFrame):
                     encoder=encoder, device=device)
                 files = collect_videos(opts["input_path"])
                 q.put(("log", f"Found {len(files)} video(s)"))
+                max_res = 720 if device.type == "mps" else 1280
                 for i, path in enumerate(files):
                     control()
                     q.put(("progress", i, len(files)))
@@ -770,6 +784,7 @@ class ConvertTab(ctk.CTkFrame):
                         depth_scale=opts["depth_scale"],
                         sbs_mode=opts["sbs_mode"],
                         sbs_blur=opts["sbs_blur"],
+                        max_res=max_res,
                         depth_only=opts["depth_only"],
                         log=log,
                         control=control,
@@ -833,6 +848,7 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.stop(completed=kind == "done")
                     self._log.log(msg[1])
                     self._set_run_controls_enabled(True)
+                    self._on_mode_change(self._mode_var.get())
                     self._run_btn.configure(state="normal", text="Convert")
                     self._pause_btn.configure(state="disabled", text="Pause")
                     self._cancel_btn.configure(state="disabled", text="Cancel")
@@ -841,6 +857,7 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.stop(completed=False)
                     messagebox.showerror("Error", msg[1])
                     self._set_run_controls_enabled(True)
+                    self._on_mode_change(self._mode_var.get())
                     self._run_btn.configure(state="normal", text="Convert")
                     self._pause_btn.configure(state="disabled", text="Pause")
                     self._cancel_btn.configure(state="disabled", text="Cancel")

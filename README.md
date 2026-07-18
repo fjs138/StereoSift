@@ -28,7 +28,7 @@ across separate scripts and tools:
 * AI upscaling for headset-ready or high-resolution exports
 * Batch image QC for exposure, structure, and structural artifacts
 * Vision-assisted folder organization with your own label set
-* Local cleanup and filename anonymization before sharing a project
+* Local cleanup and compact renaming for long, repetitive generated-image filenames
 
 It is designed for local-first workflows where you want a GUI, repeatability,
 and the option to stay fully offline.
@@ -65,7 +65,7 @@ and the option to stay fully offline.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
 * Sort images into arbitrary user-defined categories such as `outdoors, indoors`.
-* Purge local artifacts and anonymize filenames when you need a clean handoff.
+* Purge local artifacts and shorten unwieldy generated-image filenames.
 
 ## How It Works
 
@@ -86,9 +86,12 @@ local moondream2 scan.
 Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
 is the safest choice if you want no network-capable behavior at all.
 
-Sanitize removes local caches, reports, and assistant state
-from a selected folder, and it can also anonymize filenames with short random
-lowercase alphanumeric names while preserving extensions.
+Sanitize removes local caches, reports, and assistant state from a selected
+folder. Its optional renaming tool was built for image generators such as Draw
+Things, which can assign extremely long, visually similar filenames to every
+image in a batch. It replaces those names with short, unique lowercase
+alphanumeric names while preserving file extensions, making large folders much
+easier to browse and manage.
 
 ## Example Workflows
 
@@ -96,6 +99,7 @@ lowercase alphanumeric names while preserving extensions.
 * Upscale a folder of rendered images or product shots to a consistent target size.
 * Triage AI-generated portraits or character images for obvious structural defects.
 * Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
+* Replace a batch of long, look-alike Draw Things filenames with compact unique names.
 * Clean a local project folder before handing it to someone else.
 
 ## Structure of Project
@@ -109,7 +113,7 @@ lowercase alphanumeric names while preserving extensions.
 | `video_converter.py` | Video Depth Anything streaming and encoding |
 | `sbs/sbs.py` | SBS warping and conversion helpers |
 | `tests/` | Automated tests |
-| `sanitizer.py` | Workspace cleanup and filename anonymizing helpers |
+| `sanitizer.py` | Workspace cleanup and compact filename helpers |
 | `models/` | Downloaded checkpoints |
 | `video_depth_anything_repo/` | Vendored Video Depth Anything code |
 | `depth_anything_v2/` | Depth Anything V2 implementation |
@@ -151,9 +155,10 @@ Five tabs:
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
 * Sanitize removes local artifacts from a folder while leaving the runnable
-  environment and downloaded models intact, and it can anonymize every file in
-  a folder tree using the shortest lowercase alphanumeric token length that fits
-  your chosen per-folder cap.
+  environment and downloaded models intact. Its optional renaming tool shortens
+  the very long, similar filenames produced by apps such as Draw Things. It uses
+  the shortest unique lowercase alphanumeric token length that fits your chosen
+  per-folder cap and preserves each file's extension.
 
 ## SBS Conversion
 
@@ -168,6 +173,7 @@ python convert.py --input photo.jpg --output-dir output --output-format both --y
 
 # Video
 python convert.py --input movie.mp4 --output-dir output --video-encoder vits --yes
+python convert.py --input movie.mp4 --output-dir output --video-encoder vits --max-res 720 --video-input-size 392 --yes
 
 # Interactive launcher
 sh sbs.sh
@@ -185,9 +191,16 @@ python upscaler.py --input ~/Pictures/batch --long-edge 7680 --output-dir output
 ```
 
 Video encoder choices: `vits` is fast, `vitb` is balanced, and `vitl` is the
-best quality. Image model selection follows the same idea through `--model`.
-Anaglyph output currently applies to images, and `--convergence` controls where
-the depth plane sits when you view red-cyan output.
+best quality. Video conversion uses the streaming Video Depth Anything path, so
+each frame is depth-estimated, converted to left/right SBS, and written directly
+to the output video without loading the whole movie into memory. Video outputs
+use a `_SBS_LR` filename suffix to help Quest video players detect left/right
+SBS mode; if your player still opens it flat, manually choose SBS/left-right
+3D in the player. Use `--max-res` and `--video-input-size` to trade quality for
+speed/memory on long clips.
+Image model selection follows the same idea through `--model`. Anaglyph output
+currently applies to images, and `--convergence` controls where the depth plane
+sits when you view red-cyan output.
 
 ## Image QC
 
