@@ -263,6 +263,7 @@ def upscale_video(
     max_seconds: float = -1,
     log: Callable[[str], None] = print,
     control: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Upscale a video frame-by-frame and preserve the original audio track."""
     if control:
@@ -339,6 +340,8 @@ def upscale_video(
                 out_image = out_image.resize((out_width, out_height), Image.Resampling.LANCZOS)
             writer.append_data(np.asarray(out_image.convert("RGB"), dtype=np.uint8))
             frames_written += 1
+            if progress and total:
+                progress(frames_written, total)
             if total:
                 log(f"  frame {frames_written}/{total}")
     finally:

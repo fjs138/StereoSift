@@ -205,6 +205,7 @@ def convert_video_to_sbs(
     depth_only: bool = False,
     log: Callable[[str], None] = print,
     control: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
     **_ignored,
 ) -> bool:
     """Convert a single video to a side-by-side 3D video.
@@ -351,6 +352,8 @@ def convert_video_to_sbs(
 
                 writer.append_data(encoded)
                 out_idx += 1
+                if progress and selected_total:
+                    progress(out_idx, selected_total)
                 bar.update(1)
 
     finally:

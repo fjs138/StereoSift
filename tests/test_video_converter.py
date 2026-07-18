@@ -215,6 +215,39 @@ class TestVideoConverter(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(model.calls, 2)
 
+    def test_convert_video_to_sbs_reports_frame_progress(self):
+        input_path = os.path.join(self.tmpdir, "progress.mp4")
+        output_dir = os.path.join(self.tmpdir, "out")
+        _write_test_video(input_path, width=8, height=6, frames=3)
+        updates = []
+
+        def fake_sbs(base_image, *_args, **_kwargs):
+            return torch.cat([base_image, base_image], dim=2)
+
+        def fake_mux(args, **_kwargs):
+            shutil.copyfile(args[3], args[-1])
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("video_converter.process_image_sbs", side_effect=fake_sbs), patch(
+            "video_converter.subprocess.run",
+            side_effect=fake_mux,
+        ):
+            ok = convert_video_to_sbs(
+                input_path,
+                output_dir,
+                FakeStreamingModel(),
+                torch.device("cpu"),
+                torch.float32,
+                False,
+                max_res=-1,
+                temporal_smoothing=0.0,
+                log=lambda _msg: None,
+                progress=lambda done, total: updates.append((done, total)),
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(updates, [(1, 3), (2, 3), (3, 3)])
+
 
 if __name__ == "__main__":
     unittest.main()

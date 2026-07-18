@@ -76,6 +76,28 @@ class TestVideoUpscaler(unittest.TestCase):
         self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 3)
         capture.release()
 
+    def test_upscale_video_reports_frame_progress(self):
+        source = os.path.join(self.tmpdir, "progress.mp4")
+        output_dir = os.path.join(self.tmpdir, "out")
+        _write_video(source, frames=3)
+        updates = []
+
+        def fake_mux(args, **_kwargs):
+            Path(args[-1]).write_bytes(Path(args[3]).read_bytes())
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("upscaler.subprocess.run", side_effect=fake_mux):
+            upscale_video(
+                source,
+                output_dir,
+                FakeVideoUpscaler(),
+                long_edge=16,
+                log=lambda _msg: None,
+                progress=lambda done, total: updates.append((done, total)),
+            )
+
+        self.assertEqual(updates, [(1, 3), (2, 3), (3, 3)])
+
 
 if __name__ == "__main__":
     unittest.main()

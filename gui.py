@@ -503,7 +503,7 @@ class LogPanel(ctk.CTkFrame):
             text += f"  |  ETA: {self._format_seconds(rate * remaining)}"
         self._timer_lbl.configure(text=text)
 
-    def set_progress(self, done: int, total: int) -> None:
+    def set_progress(self, done: int, total: int, label: str | None = None) -> None:
         self._last_done = done
         self._last_total = total
         if total > 0:
@@ -511,7 +511,8 @@ class LogPanel(ctk.CTkFrame):
             self._bar.configure(mode="determinate")
             self._bar.stop()
             self._bar.set(frac)
-            self._lbl.configure(text=f"{done} / {total}  ({percent}%)")
+            prefix = f"{label}: " if label else ""
+            self._lbl.configure(text=f"{prefix}{done} / {total}  ({percent}%)")
         self._update_timer()
 
     def stop(self, *, completed: bool = True) -> None:
@@ -966,6 +967,12 @@ class ConvertTab(ctk.CTkFrame):
                         depth_only=opts.depth_only,
                         log=log,
                         control=control,
+                        progress=lambda done, total, file_index=i: q.put((
+                            "progress_detail",
+                            done,
+                            total,
+                            f"Video {file_index + 1}/{len(files)} frames",
+                        )),
                     )
                     suffix = "depth" if opts.depth_only else "SBS_LR"
                     output_path = os.path.join(
@@ -1041,6 +1048,8 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.log(msg[1])
                 elif kind == "progress":
                     self._log.set_progress(msg[1], msg[2])
+                elif kind == "progress_detail":
+                    self._log.set_progress(msg[1], msg[2], msg[3])
                 elif kind in {"done", "stopped"}:
                     self._log.stop(completed=kind == "done")
                     self._log.log(msg[1])
@@ -1295,6 +1304,12 @@ class UpscaleTab(ctk.CTkFrame):
                         target_box=target_box,
                         log=log,
                         control=control,
+                        progress=lambda done, total, file_index=index: self._q.put((
+                            "progress_detail",
+                            done,
+                            total,
+                            f"Video {file_index + 1}/{len(files)} frames",
+                        )),
                     )
                 else:
                     upscale_file(path, out, engine, long_edge, output_format, log,
@@ -1323,6 +1338,8 @@ class UpscaleTab(ctk.CTkFrame):
                     self._log.log(msg[1])
                 elif msg[0] == "progress":
                     self._log.set_progress(msg[1], msg[2])
+                elif msg[0] == "progress_detail":
+                    self._log.set_progress(msg[1], msg[2], msg[3])
                 elif msg[0] in ("done", "stopped", "error"):
                     self._log.stop(completed=msg[0] == "done")
                     if msg[0] in ("done", "stopped"):
