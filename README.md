@@ -152,9 +152,10 @@ Five tabs:
 * Upscale runs tiled Real-ESRGAN x2plus on one image or a folder. Its default
   Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
   4128×2208; a true 7680 px source option is also available.
-* Convert turns 2D images or videos into SBS 3D. Video mode exposes max size,
-  depth input size, output FPS, and a first-5-seconds preview before committing
-  to a long clip.
+* Convert turns 2D images or videos into SBS 3D. It detects whether your chosen
+  file/folder contains images or videos and shows the right options. For videos,
+  it exposes max size, depth input size, output FPS, and a first-5-seconds
+  preview before committing to a long clip.
 * Tools / Rename is not part of the normal workflow. Cleanup removes local
   assistant/cache/audit artifacts while leaving media, outputs, runnable
   environment, and downloaded models intact. The renamer anonymizes media

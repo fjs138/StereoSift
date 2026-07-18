@@ -30,6 +30,9 @@ from urllib import request as urllib_request
 
 import customtkinter as ctk
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
+
 # ── appearance ───────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -48,15 +51,11 @@ _BACKEND_MODEL_CHOICES = [
     "Qwen3.6-35B-A3B-Instruct-MLX-4bit",
 ]
 _MODEL_SELECTED_PREFIX = "[Selected] "
-_IMAGE_MODE_LABEL = "Images → SBS / Anaglyph"
-_VIDEO_MODE_LABEL = "Videos → SBS_LR for Quest"
-
-
 @dataclass(frozen=True)
 class ConvertOptions:
     input_path: str
     output_dir: str
-    mode: str
+    input_kind: str
     size: str
     method: str
     sbs_mode: str
@@ -72,7 +71,7 @@ class ConvertOptions:
 
     @property
     def is_video(self) -> bool:
-        return self.mode == _VIDEO_MODE_LABEL
+        return self.input_kind == "video"
 
 
 def _resolve_img_model(size_label: str, device_type: str) -> str:
@@ -99,6 +98,41 @@ def _looks_like_file_path(path: str) -> bool:
         return False
     basename = os.path.basename(trimmed.rstrip(os.sep))
     return bool(os.path.splitext(basename)[1])
+
+
+def _input_kind(path: str) -> str:
+    """Return image, video, mixed, folder, missing, or unknown for a file/folder."""
+    expanded = os.path.abspath(os.path.expanduser(path.strip()))
+    if not expanded:
+        return "unknown"
+    if os.path.isfile(expanded):
+        ext = os.path.splitext(expanded)[1].lower()
+        if ext in VIDEO_EXTENSIONS:
+            return "video"
+        if ext in IMAGE_EXTENSIONS:
+            return "image"
+        return "unknown"
+    if os.path.isdir(expanded):
+        has_images = False
+        has_videos = False
+        try:
+            for name in os.listdir(expanded):
+                child = os.path.join(expanded, name)
+                if not os.path.isfile(child):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                has_images = has_images or ext in IMAGE_EXTENSIONS
+                has_videos = has_videos or ext in VIDEO_EXTENSIONS
+                if has_images and has_videos:
+                    return "mixed"
+        except OSError:
+            return "unknown"
+        if has_videos:
+            return "video"
+        if has_images:
+            return "image"
+        return "folder"
+    return "missing"
 
 
 def _suggest_output_path(path: str, output_suffix: str, *, is_file: bool) -> str:
@@ -497,7 +531,7 @@ class ConvertTab(ctk.CTkFrame):
 
     Images use DepthAnythingV2 (frame-level model).
     Videos use Video Depth Anything (temporal streaming model).
-    The two modes are mutually exclusive — the model picker updates to match.
+    The selected input path determines which handler and options are shown.
     """
 
     def __init__(self, master, **kw):
@@ -554,18 +588,20 @@ class ConvertTab(ctk.CTkFrame):
             opts.grid_columnconfigure(c, weight=1)
 
         # Row 0 — labels
-        for col, text in enumerate(["Mode", "Model size", "Output format",
+        for col, text in enumerate(["Input type", "Model size", "Output format",
                                      "Method", "Viewing mode"]):
             ctk.CTkLabel(opts, text=text).grid(
                 row=0, column=col, padx=8, pady=(8, 2))
 
-        # Mode — image or video; drives which model/options are shown.
-        self._mode_var = ctk.StringVar(value=_IMAGE_MODE_LABEL)
-        self._mode_menu = ctk.CTkOptionMenu(opts, variable=self._mode_var,
-                                            values=[_IMAGE_MODE_LABEL, _VIDEO_MODE_LABEL],
-                                            command=self._on_mode_change)
-        self._mode_menu.grid(
-            row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
+        # Input type is detected from the selected file/folder.
+        self._input_type_var = ctk.StringVar(value="Pick an input")
+        self._input_type_lbl = ctk.CTkLabel(
+            opts,
+            textvariable=self._input_type_var,
+            text_color="#ddd",
+            anchor="center",
+        )
+        self._input_type_lbl.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
 
         # Model size picker (Small / Base / Large)
         self._size_var = ctk.StringVar(value="Large")
@@ -701,14 +737,15 @@ class ConvertTab(ctk.CTkFrame):
         self._quest_tip_lbl.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
-            self._output_entry, self._output_browse_btn, self._mode_menu,
+            self._output_entry, self._output_browse_btn,
             self._size_menu, self._fmt_menu, self._method_menu, self._sbs_mode_menu,
             self._depth_only_chk, self._depth_scale_slider, self._blur_slider,
             self._conv_slider, self._video_max_res_menu, self._video_input_size_menu,
             self._video_target_fps_menu, self._video_preview_menu,
         ])
 
-        self._on_mode_change(_IMAGE_MODE_LABEL)   # set initial labels
+        self._input_var.trace_add("write", lambda *_: self._refresh_input_type())
+        self._refresh_input_type()
         self._on_format_change("sbs")    # hide convergence initially
 
         # ── log + button ──────────────────────────────────────────────────────
@@ -739,8 +776,32 @@ class ConvertTab(ctk.CTkFrame):
             command=lambda: _open_folder(self._output_var.get().strip()),
         ).grid(row=0, column=3, padx=(4, 0), sticky="ew")
 
-    def _on_mode_change(self, value: str) -> None:
-        if value == _IMAGE_MODE_LABEL:
+    def _refresh_input_type(self) -> None:
+        kind = self._detected_input_kind()
+        if kind == "video":
+            self._input_type_var.set("Video detected")
+            self._apply_input_kind("video")
+        elif kind == "mixed":
+            self._input_type_var.set("Mixed folder — videos selected")
+            self._apply_input_kind("video")
+        elif kind == "image":
+            self._input_type_var.set("Image detected")
+            self._apply_input_kind("image")
+        elif kind == "folder":
+            self._input_type_var.set("No images/videos found")
+            self._apply_input_kind("image")
+        elif kind == "missing":
+            self._input_type_var.set("Input not found")
+            self._apply_input_kind("image")
+        else:
+            self._input_type_var.set("Pick an input")
+            self._apply_input_kind("image")
+
+    def _detected_input_kind(self) -> str:
+        return _input_kind(self._input_var.get())
+
+    def _apply_input_kind(self, kind: str) -> None:
+        if kind == "image":
             self._model_lbl.configure(
                 text="DepthAnythingV2 — static image depth model")
             self._fmt_menu.configure(state="normal")
@@ -799,10 +860,12 @@ class ConvertTab(ctk.CTkFrame):
         self._log.clear()
         self._log.start_spin()
         preview_seconds = 5 if self._video_preview_var.get() == "First 5 seconds" else 0
+        detected_kind = self._detected_input_kind()
+        input_kind = "video" if detected_kind in {"video", "mixed"} else "image"
         opts = ConvertOptions(
             input_path=inp,
             output_dir=out,
-            mode=self._mode_var.get(),
+            input_kind=input_kind,
             size=self._size_var.get(),
             method=self._method_var.get(),
             sbs_mode=self._sbs_mode_var.get(),
@@ -982,7 +1045,7 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.stop(completed=kind == "done")
                     self._log.log(msg[1])
                     self._set_run_controls_enabled(True)
-                    self._on_mode_change(self._mode_var.get())
+                    self._refresh_input_type()
                     self._run_btn.configure(state="normal", text="Convert")
                     self._pause_btn.configure(state="disabled", text="Pause")
                     self._cancel_btn.configure(state="disabled", text="Cancel")
@@ -991,7 +1054,7 @@ class ConvertTab(ctk.CTkFrame):
                     self._log.stop(completed=False)
                     messagebox.showerror("Error", msg[1])
                     self._set_run_controls_enabled(True)
-                    self._on_mode_change(self._mode_var.get())
+                    self._refresh_input_type()
                     self._run_btn.configure(state="normal", text="Convert")
                     self._pause_btn.configure(state="disabled", text="Pause")
                     self._cancel_btn.configure(state="disabled", text="Cancel")

@@ -30,6 +30,7 @@ from gui import (
     _OutputAutofillController,
     _browse_file,
     _browse_folder,
+    _input_kind,
     _merge_backend_model_choices,
     _models_url,
     _progress_display,
@@ -213,6 +214,24 @@ class TestGuiBrowseHelpers(unittest.TestCase):
         self.assertEqual(_video_option_int("Original"), -1)
         self.assertEqual(_video_option_int("720"), 720)
         self.assertEqual(_video_option_int("30 fps"), 30)
+
+    def test_input_kind_detects_file_extensions_and_mixed_folders(self):
+        import os
+        import shutil
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            image = os.path.join(tmpdir, "photo.jpg")
+            video = os.path.join(tmpdir, "clip.mp4")
+            open(image, "w").close()
+            open(video, "w").close()
+
+            self.assertEqual(_input_kind(image), "image")
+            self.assertEqual(_input_kind(video), "video")
+            self.assertEqual(_input_kind(tmpdir), "mixed")
+        finally:
+            shutil.rmtree(tmpdir)
 
 
 if __name__ == "__main__":
