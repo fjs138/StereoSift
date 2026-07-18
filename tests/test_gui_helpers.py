@@ -35,6 +35,7 @@ from gui import (
     _progress_display,
     _split_labels,
     _strip_model_menu_label,
+    _video_option_int,
 )
 
 
@@ -207,6 +208,11 @@ class TestGuiBrowseHelpers(unittest.TestCase):
 
         self.assertEqual(frac, 1.0)
         self.assertEqual(percent, 100)
+
+    def test_video_option_int_accepts_original_and_numeric_labels(self):
+        self.assertEqual(_video_option_int("Original"), -1)
+        self.assertEqual(_video_option_int("720"), 720)
+        self.assertEqual(_video_option_int("30 fps"), 30)
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ def _write_test_video(path: str, *, width: int = 8, height: int = 6, frames: int
     )
     for idx in range(frames):
         frame = np.zeros((height, width, 3), dtype=np.uint8)
-        frame[:, :, 0] = idx * 40
+        frame[:, :, 0] = (idx * 40) % 256
         frame[:, :, 1] = 80
         writer.write(frame)
     writer.release()
@@ -181,6 +181,39 @@ class TestVideoConverter(unittest.TestCase):
         left = sbs_frame[:, : width // 2].astype(np.float32)
         right = sbs_frame[:, width // 2 :].astype(np.float32)
         self.assertGreater(float(np.mean(np.abs(left - right))), 5.0)
+
+    def test_convert_video_to_sbs_can_limit_by_seconds(self):
+        input_path = os.path.join(self.tmpdir, "longer.mp4")
+        output_dir = os.path.join(self.tmpdir, "out")
+        _write_test_video(input_path, width=8, height=6, frames=10)
+        model = FakeStreamingModel()
+
+        def fake_sbs(base_image, *_args, **_kwargs):
+            return torch.cat([base_image, base_image], dim=2)
+
+        def fake_mux(args, **_kwargs):
+            shutil.copyfile(args[3], args[-1])
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("video_converter.process_image_sbs", side_effect=fake_sbs), patch(
+            "video_converter.subprocess.run",
+            side_effect=fake_mux,
+        ):
+            ok = convert_video_to_sbs(
+                input_path,
+                output_dir,
+                model,
+                torch.device("cpu"),
+                torch.float32,
+                False,
+                max_seconds=0.4,
+                max_res=-1,
+                temporal_smoothing=0.0,
+                log=lambda _msg: None,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(model.calls, 2)
 
 
 if __name__ == "__main__":

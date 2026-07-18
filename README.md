@@ -142,11 +142,6 @@ python gui.py
 
 Five tabs:
 
-* Convert turns 2D images or videos into SBS 3D. Pick a model size, choose the
-  output style, and run it.
-* Upscale runs tiled Real-ESRGAN x2plus on one image or a folder. Its default
-  Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
-  4128×2208; a true 7680 px source option is also available.
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
   person counts, issues, and optional structural notes when the fallback scan is on.
 * Judge also has a strict offline toggle that keeps everything local and blocks
@@ -154,11 +149,16 @@ Five tabs:
 * Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
-* Sanitize removes local artifacts from a folder while leaving the runnable
-  environment and downloaded models intact. Its optional renaming tool shortens
-  the very long, similar filenames produced by apps such as Draw Things. It uses
-  the shortest unique lowercase alphanumeric token length that fits your chosen
-  per-folder cap and preserves each file's extension.
+* Upscale runs tiled Real-ESRGAN x2plus on one image or a folder. Its default
+  Quest 3 preset fits each future eye within 2064×2208, producing SBS up to
+  4128×2208; a true 7680 px source option is also available.
+* Convert turns 2D images or videos into SBS 3D. Video mode exposes max size,
+  depth input size, output FPS, and a first-5-seconds preview before committing
+  to a long clip.
+* Tools / Rename is not part of the normal workflow. Cleanup removes local
+  assistant/cache/audit artifacts while leaving media, outputs, runnable
+  environment, and downloaded models intact. The renamer anonymizes media
+  filenames with short lowercase alphanumeric names while preserving extensions.
 
 ## SBS Conversion
 
@@ -174,6 +174,7 @@ python convert.py --input photo.jpg --output-dir output --output-format both --y
 # Video
 python convert.py --input movie.mp4 --output-dir output --video-encoder vits --yes
 python convert.py --input movie.mp4 --output-dir output --video-encoder vits --max-res 720 --video-input-size 392 --yes
+python convert.py --input movie.mp4 --output-dir output --video-encoder vits --max-seconds 5 --yes
 
 # Interactive launcher
 sh sbs.sh
@@ -196,8 +197,8 @@ each frame is depth-estimated, converted to left/right SBS, and written directly
 to the output video without loading the whole movie into memory. Video outputs
 use a `_SBS_LR` filename suffix to help Quest video players detect left/right
 SBS mode; if your player still opens it flat, manually choose SBS/left-right
-3D in the player. Use `--max-res` and `--video-input-size` to trade quality for
-speed/memory on long clips.
+3D in the player. Use `--max-res`, `--video-input-size`, `--target-fps`, and
+`--max-seconds` to trade quality for speed/memory or make short test previews.
 Image model selection follows the same idea through `--model`. Anaglyph output
 currently applies to images, and `--convergence` controls where the depth plane
 sits when you view red-cyan output.

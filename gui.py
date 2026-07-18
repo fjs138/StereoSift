@@ -2,11 +2,11 @@
 """StereoSift — CustomTkinter GUI.
 
 Five tabs:
-  • Convert   — 2D images / videos → SBS 3D
-  • Upscale   — images → Quest-ready high resolution
-  • Judge     — local QC: pass / warning / fail / violations sorting
-  • Organize  — vision-model sorting into user-defined folders
-  • Sanitize  — purge local artifacts and anonymize filenames
+  • Judge          — local QC: pass / warning / fail / violations sorting
+  • Organize       — vision-model sorting into user-defined folders
+  • Upscale        — images → Quest-ready high resolution
+  • Convert        — 2D images / videos → SBS 3D
+  • Tools / Rename — purge local artifacts and anonymize filenames
 
 All heavy work runs in a background thread so the UI stays responsive.
 Progress and log output stream back to the main thread via a queue.
@@ -14,6 +14,7 @@ Progress and log output stream back to the main thread via a queue.
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 import importlib
 import json
 import os
@@ -47,6 +48,31 @@ _BACKEND_MODEL_CHOICES = [
     "Qwen3.6-35B-A3B-Instruct-MLX-4bit",
 ]
 _MODEL_SELECTED_PREFIX = "[Selected] "
+_IMAGE_MODE_LABEL = "Images → SBS / Anaglyph"
+_VIDEO_MODE_LABEL = "Videos → SBS_LR for Quest"
+
+
+@dataclass(frozen=True)
+class ConvertOptions:
+    input_path: str
+    output_dir: str
+    mode: str
+    size: str
+    method: str
+    sbs_mode: str
+    depth_scale: int
+    sbs_blur: int
+    depth_only: bool
+    output_format: str
+    convergence: float
+    video_max_res: int
+    video_input_size: int
+    video_target_fps: int
+    video_preview_seconds: int
+
+    @property
+    def is_video(self) -> bool:
+        return self.mode == _VIDEO_MODE_LABEL
 
 
 def _resolve_img_model(size_label: str, device_type: str) -> str:
@@ -253,6 +279,20 @@ def _open_folder(path: str) -> None:
         subprocess.Popen(["explorer", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def _video_option_int(value: str) -> int:
+    value = value.strip().lower()
+    if value in {"original", "source", "full"}:
+        return -1
+    digits = "".join(ch for ch in value if ch.isdigit())
+    return int(digits) if digits else -1
+
+
+def _write_json_report(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
 
 
 def _split_labels(text: str) -> list[str]:
@@ -519,10 +559,10 @@ class ConvertTab(ctk.CTkFrame):
             ctk.CTkLabel(opts, text=text).grid(
                 row=0, column=col, padx=8, pady=(8, 2))
 
-        # Mode — Images or Video; drives which model label is shown
-        self._mode_var = ctk.StringVar(value="Images")
+        # Mode — image or video; drives which model/options are shown.
+        self._mode_var = ctk.StringVar(value=_IMAGE_MODE_LABEL)
         self._mode_menu = ctk.CTkOptionMenu(opts, variable=self._mode_var,
-                                            values=["Images", "Video"],
+                                            values=[_IMAGE_MODE_LABEL, _VIDEO_MODE_LABEL],
                                             command=self._on_mode_change)
         self._mode_menu.grid(
             row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
@@ -564,7 +604,7 @@ class ConvertTab(ctk.CTkFrame):
 
         # Depth-only checkbox on its own row
         self._depth_only_var = ctk.BooleanVar(value=False)
-        self._depth_only_chk = ctk.CTkCheckBox(opts, text="Depth map only",
+        self._depth_only_chk = ctk.CTkCheckBox(opts, text="Debug: save depth map instead of SBS",
                                                variable=self._depth_only_var)
         self._depth_only_chk.grid(
             row=2, column=2, columnspan=3, padx=8, pady=(0, 4), sticky="w")
@@ -613,25 +653,72 @@ class ConvertTab(ctk.CTkFrame):
         self._conv_var.trace_add(
             "write", lambda *_: self._conv_lbl.configure(
                 text=f"{self._conv_var.get():.2f}"))
+
+        # Video-specific controls. Hidden for image mode.
+        self._video_opts = ctk.CTkFrame(self)
+        self._video_opts.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        for col, text in enumerate(["Video max size", "Depth input", "Output FPS", "Preview"]):
+            ctk.CTkLabel(self._video_opts, text=text).grid(
+                row=0, column=col, padx=8, pady=(8, 2))
+        self._video_max_res_var = ctk.StringVar(value="1280")
+        self._video_max_res_menu = ctk.CTkOptionMenu(
+            self._video_opts,
+            variable=self._video_max_res_var,
+            values=["720", "1080", "1280", "Original"],
+        )
+        self._video_max_res_menu.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
+        self._video_input_size_var = ctk.StringVar(value="518")
+        self._video_input_size_menu = ctk.CTkOptionMenu(
+            self._video_opts,
+            variable=self._video_input_size_var,
+            values=["392", "518"],
+        )
+        self._video_input_size_menu.grid(row=1, column=1, padx=8, pady=(0, 8), sticky="ew")
+        self._video_target_fps_var = ctk.StringVar(value="Original")
+        self._video_target_fps_menu = ctk.CTkOptionMenu(
+            self._video_opts,
+            variable=self._video_target_fps_var,
+            values=["Original", "24", "30"],
+        )
+        self._video_target_fps_menu.grid(row=1, column=2, padx=8, pady=(0, 8), sticky="ew")
+        self._video_preview_var = ctk.StringVar(value="Full video")
+        self._video_preview_menu = ctk.CTkOptionMenu(
+            self._video_opts,
+            variable=self._video_preview_var,
+            values=["Full video", "First 5 seconds"],
+        )
+        self._video_preview_menu.grid(row=1, column=3, padx=8, pady=(0, 8), sticky="ew")
+        self._quest_tip_lbl = ctk.CTkLabel(
+            self._video_opts,
+            text=(
+                "Quest tip: videos are saved as *_SBS_LR.*. If the headset/player opens "
+                "one flat, choose SBS / Left-Right 3D in the player."
+            ),
+            text_color="#aaa",
+            wraplength=780,
+            justify="left",
+        )
+        self._quest_tip_lbl.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
             self._output_entry, self._output_browse_btn, self._mode_menu,
             self._size_menu, self._fmt_menu, self._method_menu, self._sbs_mode_menu,
             self._depth_only_chk, self._depth_scale_slider, self._blur_slider,
-            self._conv_slider,
+            self._conv_slider, self._video_max_res_menu, self._video_input_size_menu,
+            self._video_target_fps_menu, self._video_preview_menu,
         ])
 
-        self._on_mode_change("Images")   # set initial labels
+        self._on_mode_change(_IMAGE_MODE_LABEL)   # set initial labels
         self._on_format_change("sbs")    # hide convergence initially
 
         # ── log + button ──────────────────────────────────────────────────────
         self._log = LogPanel(self)
-        self._log.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
-        self.grid_rowconfigure(2, weight=1)
+        self._log.grid(row=3, column=0, sticky="nsew", padx=12, pady=4)
+        self.grid_rowconfigure(3, weight=1)
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
-        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+        btn_row.grid(row=4, column=0, padx=12, pady=(4, 12), sticky="ew")
+        btn_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         self._run_btn = ctk.CTkButton(
             btn_row, text="Convert", height=38, command=self._run)
@@ -646,18 +733,25 @@ class ConvertTab(ctk.CTkFrame):
             state="disabled", fg_color="#cc2222", hover_color="#dd3333",
         )
         self._cancel_btn.grid(row=0, column=2, padx=(4, 0), sticky="ew")
+        ctk.CTkButton(
+            btn_row, text="Open output folder", height=38,
+            fg_color="#444", hover_color="#555",
+            command=lambda: _open_folder(self._output_var.get().strip()),
+        ).grid(row=0, column=3, padx=(4, 0), sticky="ew")
 
     def _on_mode_change(self, value: str) -> None:
-        if value == "Images":
+        if value == _IMAGE_MODE_LABEL:
             self._model_lbl.configure(
                 text="DepthAnythingV2 — static image depth model")
             self._fmt_menu.configure(state="normal")
+            self._video_opts.grid_forget()
             if self._auto_video_strength_active and self._depth_scale_var.get() == 70:
                 self._depth_scale_var.set(40)
             self._auto_video_strength_active = False
         else:
             self._model_lbl.configure(
                 text="Video Depth Anything — temporal streaming model")
+            self._video_opts.grid(row=2, column=0, sticky="ew", padx=12, pady=4)
             # Videos are rendered as Quest-ready left/right SBS.  The red-cyan
             # anaglyph formatter is image-only, so keep the video path honest.
             self._output_format_var.set("sbs")
@@ -704,7 +798,8 @@ class ConvertTab(ctk.CTkFrame):
         self._cancel_btn.configure(state="normal", text="Cancel")
         self._log.clear()
         self._log.start_spin()
-        opts = dict(
+        preview_seconds = 5 if self._video_preview_var.get() == "First 5 seconds" else 0
+        opts = ConvertOptions(
             input_path=inp,
             output_dir=out,
             mode=self._mode_var.get(),
@@ -716,6 +811,10 @@ class ConvertTab(ctk.CTkFrame):
             depth_only=self._depth_only_var.get(),
             output_format=self._output_format_var.get(),
             convergence=round(self._conv_var.get(), 2),
+            video_max_res=_video_option_int(self._video_max_res_var.get()),
+            video_input_size=_video_option_int(self._video_input_size_var.get()),
+            video_target_fps=_video_option_int(self._video_target_fps_var.get()),
+            video_preview_seconds=preview_seconds,
         )
         threading.Thread(
             target=self._worker,
@@ -745,7 +844,7 @@ class ConvertTab(ctk.CTkFrame):
 
     def _worker(
         self,
-        opts: dict,
+        opts: ConvertOptions,
         stop_event: threading.Event,
         pause_event: threading.Event,
     ):
@@ -757,70 +856,105 @@ class ConvertTab(ctk.CTkFrame):
             from convert import get_device, collect_images, collect_videos, convert_one
 
             device    = get_device()
-            is_video  = opts["mode"] == "Video"
+            is_video  = opts.is_video
+            started_at = time.perf_counter()
+            report: dict[str, object] = {
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "options": asdict(opts),
+                "device": str(device),
+                "files": [],
+            }
 
             if is_video:
                 from video_converter import (
                     load_video_depth_model, convert_video_to_sbs)
-                encoder = _VID_ENCODERS[opts["size"]]
+                encoder = _VID_ENCODERS[opts.size]
                 q.put(("log",
-                       f"Loading Video Depth Anything — {opts['size']} ({encoder})…"))
+                       f"Loading Video Depth Anything — {opts.size} ({encoder})…"))
                 model, dtype, is_metric = load_video_depth_model(
                     encoder=encoder, device=device)
-                files = collect_videos(opts["input_path"])
+                files = collect_videos(opts.input_path)
                 q.put(("log", f"Found {len(files)} video(s)"))
-                max_res = 720 if device.type == "mps" else 1280
+                max_res = opts.video_max_res
+                if device.type == "mps" and max_res == 1280:
+                    max_res = 720
+                    q.put(("log", "Apple Silicon safety limit: using 720 video max size."))
+                target_fps = opts.video_target_fps
+                if opts.video_preview_seconds > 0:
+                    q.put(("log", f"Preview mode: processing about the first {opts.video_preview_seconds} seconds."))
                 for i, path in enumerate(files):
                     control()
                     q.put(("progress", i, len(files)))
                     q.put(("log",
                            f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
-                    convert_video_to_sbs(
+                    ok = convert_video_to_sbs(
                         video_path=path,
-                        output_dir=opts["output_dir"],
+                        output_dir=opts.output_dir,
                         model=model, device=device,
                         dtype=dtype, is_metric=is_metric,
-                        sbs_method=opts["method"],
-                        depth_scale=opts["depth_scale"],
-                        sbs_mode=opts["sbs_mode"],
-                        sbs_blur=opts["sbs_blur"],
+                        sbs_method=opts.method,
+                        depth_scale=opts.depth_scale,
+                        sbs_mode=opts.sbs_mode,
+                        sbs_blur=opts.sbs_blur,
                         max_res=max_res,
-                        depth_only=opts["depth_only"],
+                        input_size=opts.video_input_size,
+                        target_fps=target_fps,
+                        max_seconds=opts.video_preview_seconds if opts.video_preview_seconds > 0 else -1,
+                        depth_only=opts.depth_only,
                         log=log,
                         control=control,
                     )
+                    suffix = "depth" if opts.depth_only else "SBS_LR"
+                    output_path = os.path.join(
+                        opts.output_dir,
+                        f"{os.path.splitext(os.path.basename(path))[0]}_{suffix}{os.path.splitext(path)[1]}",
+                    )
+                    report["files"].append({
+                        "input": path,
+                        "output": output_path,
+                        "success": ok,
+                    })
                     control()
                     q.put(("progress", i + 1, len(files)))
             else:
                 from depth_model import load_depth_model
-                model_name = _resolve_img_model(opts["size"], device.type)
+                model_name = _resolve_img_model(opts.size, device.type)
                 q.put(("log",
-                       f"Loading DepthAnythingV2 — {opts['size']} ({model_name})…"))
+                       f"Loading DepthAnythingV2 — {opts.size} ({model_name})…"))
                 model, dtype, is_metric = load_depth_model(model_name, device)
-                files = collect_images(opts["input_path"])
+                files = collect_images(opts.input_path)
                 q.put(("log", f"Found {len(files)} image(s)"))
                 for i, path in enumerate(files):
                     control()
                     q.put(("progress", i, len(files)))
                     q.put(("log",
                            f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
-                    convert_one(
-                        model, path, opts["output_dir"],
+                    ok = convert_one(
+                        model, path, opts.output_dir,
                         device, dtype, is_metric,
-                        depth_only=opts["depth_only"],
+                        depth_only=opts.depth_only,
                         depth_input_scale=0.5,
-                        sbs_method=opts["method"],
-                        depth_scale=opts["depth_scale"],
-                        sbs_mode=opts["sbs_mode"],
-                        sbs_blur=opts["sbs_blur"],
-                        output_format=opts["output_format"],
-                        convergence=opts["convergence"],
+                        sbs_method=opts.method,
+                        depth_scale=opts.depth_scale,
+                        sbs_mode=opts.sbs_mode,
+                        sbs_blur=opts.sbs_blur,
+                        output_format=opts.output_format,
+                        convergence=opts.convergence,
                         log=log,
                         control=control,
                     )
+                    report["files"].append({
+                        "input": path,
+                        "success": ok,
+                    })
                     control()
                     q.put(("progress", i + 1, len(files)))
 
+            report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            report["seconds"] = round(time.perf_counter() - started_at, 3)
+            report_path = os.path.join(opts.output_dir, "conversion_report.json")
+            _write_json_report(report_path, report)
+            q.put(("log", f"Report saved: {report_path}"))
             q.put(("done", f"Finished — {len(files)} file(s) converted."))
         except _RunCancelled:
             q.put(("stopped", "Conversion cancelled by user."))
@@ -2127,7 +2261,7 @@ class OrganizeTab(ctk.CTkFrame):
 # ── Sanitize tab ──────────────────────────────────────────────────────────────
 
 class SanitizeTab(ctk.CTkFrame):
-    """Purge local artifacts and anonymize filenames."""
+    """Tools: purge local artifacts and anonymize filenames."""
 
     def __init__(self, master, **kw):
         super().__init__(master, fg_color="transparent", **kw)
@@ -2147,7 +2281,7 @@ class SanitizeTab(ctk.CTkFrame):
         cleanup.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
         cleanup.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(cleanup, text="Sanitize folder", anchor="w").grid(
+        ctk.CTkLabel(cleanup, text="Cleanup workspace artifacts", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4)
         )
         self._cleanup_root_var = ctk.StringVar(value=os.getcwd())
@@ -2161,9 +2295,10 @@ class SanitizeTab(ctk.CTkFrame):
         ctk.CTkLabel(
             cleanup,
             text=(
-                "Removes local assistant state, caches, .DS_Store files, compiled Python "
-                "files, reports, and audit logs while leaving your media, outputs, runnable "
-                "environment and downloaded models alone."
+                "This is not part of the normal image workflow. It removes local assistant "
+                "state, caches, .DS_Store files, compiled Python files, reports, and audit "
+                "logs while leaving your media, outputs, runnable environment, and downloaded "
+                "models alone."
             ),
             text_color="#aaa",
             wraplength=760,
@@ -2175,7 +2310,7 @@ class SanitizeTab(ctk.CTkFrame):
         rename.grid_columnconfigure(1, weight=1)
         rename.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(rename, text="Anonymize folder", anchor="w").grid(
+        ctk.CTkLabel(rename, text="Anonymize / rename media files", anchor="w").grid(
             row=0, column=0, sticky="w", padx=(8, 6), pady=(8, 4)
         )
         self._rename_root_var = ctk.StringVar()
@@ -2211,8 +2346,8 @@ class SanitizeTab(ctk.CTkFrame):
         ctk.CTkLabel(
             rename,
             text=(
-                "Renames files only, preserves each file extension, and uses lowercase "
-                "letters plus digits."
+                "This is the renamer. It renames files only, preserves each file extension, "
+                "skips hidden files, and uses lowercase letters plus digits."
             ),
             text_color="#aaa",
             wraplength=760,
@@ -2234,7 +2369,7 @@ class SanitizeTab(ctk.CTkFrame):
         btn_row.grid(row=3, column=0, padx=12, pady=(4, 12), sticky="ew")
         btn_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self._sanitize_btn = ctk.CTkButton(
-            btn_row, text="Sanitize folder", height=38, command=self._run_cleanup
+            btn_row, text="Clean artifacts", height=38, command=self._run_cleanup
         )
         self._sanitize_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
         self._rename_btn = ctk.CTkButton(
@@ -2328,7 +2463,7 @@ class SanitizeTab(ctk.CTkFrame):
             return
         self._start_task(
             task_label="filename anonymizer",
-            sanitize_text="Sanitize folder",
+            sanitize_text="Clean artifacts",
             rename_text="Anonymizing…",
             target=self._rename_worker,
             args=(root, max_items, self._recursive_var.get()),
@@ -2418,7 +2553,7 @@ class SanitizeTab(ctk.CTkFrame):
 
     def _finish(self):
         self._set_run_controls_enabled(True)
-        self._sanitize_btn.configure(text="Sanitize folder")
+        self._sanitize_btn.configure(text="Clean artifacts")
         self._rename_btn.configure(text="Anonymize files")
         self._pause_btn.configure(state="disabled", text="Pause")
         self._cancel_btn.configure(state="disabled", text="Cancel")
@@ -2466,7 +2601,7 @@ class App(ctk.CTk):
             text_color="#7eb3ff",
         ).pack(side="left", padx=16, pady=10)
         ctk.CTkLabel(
-            hdr, text="2D → SBS 3D  ·  AI Upscale  ·  Image QC  ·  AI Organize  ·  Sanitize",
+            hdr, text="Image QC  ·  AI Organize  ·  AI Upscale  ·  2D → SBS 3D  ·  Tools / Rename",
             text_color="#666",
         ).pack(side="left", pady=10)
 
@@ -2475,8 +2610,8 @@ class App(ctk.CTk):
         tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
 
         for name, cls in [("Judge", JudgeTab), ("Organize", OrganizeTab),
-                          ("Sanitize", SanitizeTab), ("Upscale", UpscaleTab),
-                          ("Convert", ConvertTab)]:
+                          ("Upscale", UpscaleTab), ("Convert", ConvertTab),
+                          ("Tools / Rename", SanitizeTab)]:
             tabs.add(name)
             tabs.tab(name).grid_columnconfigure(0, weight=1)
             tabs.tab(name).grid_rowconfigure(0, weight=1)

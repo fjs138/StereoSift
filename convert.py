@@ -443,6 +443,8 @@ def main():
     parser.add_argument("--video-metric", action="store_true",
                         help="Use the metric Video Depth Anything checkpoint.")
     parser.add_argument("--max-len", type=int, default=-1, help="Max frames to process (-1 = all).")
+    parser.add_argument("--max-seconds", type=float, default=-1,
+                        help="Max output seconds to process (-1 = all).")
     parser.add_argument("--target-fps", type=int, default=-1, help="Target FPS (-1 = original).")
     parser.add_argument("--max-res", type=int, default=1280, help="Max resolution dimension.")
     parser.add_argument("--video-input-size", type=int, default=518,
@@ -533,6 +535,7 @@ def main():
                         sbs_mode=args.sbs_mode,
                         sbs_blur=args.sbs_blur,
                         max_len=args.max_len,
+                        max_seconds=args.max_seconds,
                         target_fps=args.target_fps,
                         max_res=args.max_res,
                         input_size=args.video_input_size,

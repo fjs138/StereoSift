@@ -25,6 +25,7 @@ Supported encoders
 from __future__ import annotations
 
 import os
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -196,6 +197,7 @@ def convert_video_to_sbs(
     sbs_mode: str = "parallel",
     sbs_blur: int = 7,
     max_len: int = -1,
+    max_seconds: float = -1,
     target_fps: int = -1,
     max_res: int = 1280,
     input_size: int = 518,
@@ -228,6 +230,7 @@ def convert_video_to_sbs(
         sbs_mode: ``"parallel"`` or ``"cross-eyed"``.
         sbs_blur: Depth-map smoothing kernel size (odd number, 3–15).
         max_len: Stop after this many output frames (-1 = no limit).
+        max_seconds: Stop after this many output seconds (-1 = no limit).
         target_fps: Encode at this frame rate (-1 = match source).
         max_res: Downscale so the longest edge is at most this many pixels
             (-1 = no limit).
@@ -265,8 +268,12 @@ def convert_video_to_sbs(
     width, height = _target_resolution(src_width, src_height, max_res)
 
     selected_total = (src_count + stride - 1) // stride if src_count > 0 else None
-    if max_len > 0 and selected_total is not None:
-        selected_total = min(selected_total, max_len)
+    frame_limit = max_len if max_len > 0 else None
+    if max_seconds > 0:
+        seconds_limit = max(1, math.ceil(max_seconds * out_fps))
+        frame_limit = seconds_limit if frame_limit is None else min(frame_limit, seconds_limit)
+    if frame_limit is not None and selected_total is not None:
+        selected_total = min(selected_total, frame_limit)
 
     os.makedirs(output_dir, exist_ok=True)
     suffix       = "depth" if depth_only else "SBS_LR"
@@ -295,7 +302,7 @@ def convert_video_to_sbs(
                 if control:
                     control()
                 ok, bgr = cap.read()
-                if not ok or (max_len > 0 and out_idx >= max_len):
+                if not ok or (frame_limit is not None and out_idx >= frame_limit):
                     break
 
                 if src_idx % stride != 0:
