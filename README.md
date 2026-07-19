@@ -257,10 +257,12 @@ stays local to image decoding and pixel heuristics only.
 
 ### Experimental Qwen Benchmark
 
-`qwen_structure.py` is an isolated structural defect judge for model evaluation; it is not
-part of the production routing policy. It can run either against a local
-Qwen-VL checkpoint in the Hugging Face cache or against an OpenAI-compatible
-vision backend such as oMLX. For the local offline path, once the default
+`qwen_structure.py` is WIP/reference-only benchmark code. It is intentionally
+inert in the app unless someone runs or imports it directly, and it is not part
+of the GUI, converter, or production routing policy. It can run either against a
+local Qwen-VL checkpoint in the Hugging Face cache or against an
+OpenAI-compatible vision backend such as oMLX. For the local offline path, once
+the default
 `Qwen/Qwen3-VL-4B-Instruct` checkpoint is present in the Hugging Face cache,
 benchmark a labeled folder fully offline with:
 

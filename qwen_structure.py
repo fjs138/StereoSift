@@ -1,8 +1,10 @@
-"""Local Qwen3-VL structural-structure judge.
+"""Experimental local Qwen3-VL structural-structure judge.
 
-This module deliberately has no dependency on the GUI or routing policy.  It
-returns a structured observation so the caller can benchmark the model before
-deciding where a file belongs.
+WIP / reference-only code: this module is intentionally inert in the app unless
+someone imports or runs it directly. It has no dependency on the GUI, converter,
+or production routing policy. It returns a structured observation so the caller
+can benchmark the model before deciding whether it should ever graduate into the
+live QC flow.
 """
 
 from __future__ import annotations
