@@ -1534,7 +1534,7 @@ class JudgeTab(ctk.CTkFrame):
 
         ctk.CTkLabel(self._adv_frame, text="API key", anchor="w").grid(
             row=2, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._backend_api_key_var = ctk.StringVar(value="1234")
+        self._backend_api_key_var = ctk.StringVar(value="")
         self._backend_api_key_entry = ctk.CTkEntry(
             self._adv_frame, textvariable=self._backend_api_key_var,
             placeholder_text="Optional oMLX/LM Studio Bearer token", show="•",
@@ -2040,7 +2040,7 @@ class OrganizeTab(ctk.CTkFrame):
 
         ctk.CTkLabel(opts, text="API key", anchor="w").grid(
             row=4, column=0, sticky="w", padx=(8, 6), pady=4)
-        self._api_key_var = ctk.StringVar(value="1234")
+        self._api_key_var = ctk.StringVar(value="")
         self._api_key_entry = ctk.CTkEntry(
             opts, textvariable=self._api_key_var, show="•",
             placeholder_text="Optional Bearer token",
