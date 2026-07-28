@@ -38,6 +38,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from media_utils import collect_images as _collect_images
+
 try:
     import requests
 except ImportError:
@@ -52,8 +54,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 _YOLO_DIR          = Path(__file__).parent / "models" / "yolo"
 _YOLO_DETECT_FILE  = "yolo11n.pt"
@@ -1106,15 +1106,10 @@ def classify_image_with_labels(
 # ---------------------------------------------------------------------------
 
 def collect_images(input_path: str) -> List[str]:
-    input_path = os.path.expanduser(input_path)
-    if os.path.isfile(input_path):
-        return [input_path]
-    if os.path.isdir(input_path):
-        return sorted(
-            os.path.join(input_path, n) for n in os.listdir(input_path)
-            if os.path.splitext(n)[1].lower() in IMAGE_EXTENSIONS
-        )
-    raise FileNotFoundError(f"Not found: {input_path}")
+    try:
+        return _collect_images(input_path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Not found: {input_path}") from exc
 
 
 def _route_image_to_folder(

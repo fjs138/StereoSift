@@ -28,7 +28,7 @@ across separate scripts and tools:
 * AI upscaling for headset-ready or high-resolution exports
 * Batch image QC for exposure, structure, and structural artifacts
 * Vision-assisted folder organization with your own label set
-* Local cleanup and compact renaming for long, repetitive generated-image filenames
+* Optional hidden maintenance tools for cleanup and compact renaming
 
 It is designed for local-first workflows where you want a GUI, repeatability,
 and the option to stay fully offline.
@@ -59,17 +59,17 @@ and the option to stay fully offline.
 * Convert 2D images into SBS 3D.
 * Convert 2D videos into SBS 3D.
 * Keep original audio when converting video.
-* Show a GUI for conversion, upscaling, QC, image organization, and sanitizing.
+* Show a GUI for conversion, upscaling, QC, and image organization.
 * Sort QC results into `pass`, `warning`, `fail`, and a separate safety-review queue.
 * Copy originals by default, and only move files when asked.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
 * Sort images into arbitrary user-defined categories such as `outdoors, indoors`.
-* Purge local artifacts and shorten unwieldy generated-image filenames.
+* Keep local cleanup and filename anonymizing available as a hidden maintenance panel.
 
 ## How It Works
 
-StereoSift has five main paths.
+StereoSift has four main visible paths.
 
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing for
@@ -87,12 +87,13 @@ local moondream2 scan.
 Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
 is the safest choice if you want no network-capable behavior at all.
 
-Sanitize removes local caches, reports, and assistant state from a selected
-folder. Its optional renaming tool was built for image generators such as Draw
-Things, which can assign extremely long, visually similar filenames to every
-image in a batch. It replaces those names with short, unique lowercase
-alphanumeric names while preserving file extensions, making large folders much
-easier to browse and manage.
+The maintenance/rename panel is hidden from the normal GUI by default. If
+enabled in code, cleanup removes local caches, reports, and assistant state from
+a selected folder. Its optional renaming tool was built for image generators
+such as Draw Things, which can assign extremely long, visually similar
+filenames to every image in a batch. It replaces those names with short, unique
+lowercase alphanumeric names while preserving file extensions, making large
+folders much easier to browse and manage.
 
 ## Example Workflows
 
@@ -100,8 +101,7 @@ easier to browse and manage.
 * Upscale a folder of rendered images, product shots, or video clips to a consistent target size.
 * Triage AI-generated portraits or character images for obvious structural defects.
 * Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
-* Replace a batch of long, look-alike Draw Things filenames with compact unique names.
-* Clean a local project folder before handing it to someone else.
+* Optionally enable the hidden maintenance panel to rename long Draw Things filenames.
 
 ## Structure of Project
 
@@ -109,6 +109,7 @@ easier to browse and manage.
 | :-- | :-- |
 | `gui.py` | CustomTkinter desktop GUI |
 | `convert.py` | 2D to SBS 3D conversion CLI |
+| `media_utils.py` | Shared image/video detection and collection helpers |
 | `qc_pipeline.py` | QC and user-defined image organization pipelines |
 | `depth_model.py` | Depth Anything V2 loading |
 | `video_converter.py` | Video Depth Anything streaming and encoding |
@@ -135,13 +136,21 @@ Models download automatically on first use and are stored in `models/`.
 If you want a fully offline run, turn on strict offline mode in the Judge tab
 or use `--strict-offline` on the CLI.
 
+## Development checks
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+python -m compileall -q .
+```
+
 ## GUI
 
 ```bash
 python gui.py
 ```
 
-Five tabs:
+Visible tabs:
 
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
   person counts, issues, and optional structural notes when the fallback scan is on.
@@ -154,14 +163,13 @@ Five tabs:
   save as PNG/JPEG; videos are upscaled frame-by-frame, re-encoded, and keep
   audio when possible.
 * Convert turns 2D images or videos into SBS 3D. It detects whether your chosen
-  file/folder contains images or videos and shows the right options. For videos,
-  it keeps the original resolution by default and exposes optional max size,
-  depth input size, output FPS, and a first-5-seconds preview before committing
-  to a long clip.
-* Tools / Rename is not part of the normal workflow. Cleanup removes local
-  assistant/cache/audit artifacts while leaving media, outputs, runnable
-  environment, and downloaded models intact. The renamer anonymizes media
-  filenames with short lowercase alphanumeric names while preserving extensions.
+  file/folder contains images, videos, or both and routes each file to the right
+  handler. For videos, it keeps the original resolution by default and exposes
+  optional max size, depth input size, output FPS, and a first-5-seconds preview
+  before committing to a long clip.
+* Tools / Rename exists as a hidden maintenance panel only. Set
+  `SANITIZE_DISPLAY = True` in `gui.py` to show it for cleanup or filename
+  anonymizing work.
 
 ## SBS Conversion
 

@@ -15,34 +15,13 @@ import imageio
 import numpy as np
 from PIL import Image, ImageOps
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
+from media_utils import collect_images, collect_videos
+
 MODEL_URL = (
     "https://github.com/xinntao/Real-ESRGAN/releases/download/"
     "v0.2.1/RealESRGAN_x2plus.pth"
 )
 MODEL_NAME = "RealESRGAN_x2plus.pth"
-
-
-def collect_images(input_path: str) -> list[str]:
-    path = Path(input_path).expanduser()
-    if path.is_file():
-        return [str(path)] if path.suffix.lower() in IMAGE_EXTENSIONS else []
-    if path.is_dir():
-        return [str(p) for p in sorted(path.iterdir())
-                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
-    return []
-
-
-def collect_videos(input_path: str) -> list[str]:
-    path = Path(input_path).expanduser()
-    if path.is_file():
-        return [str(path)] if path.suffix.lower() in VIDEO_EXTENSIONS else []
-    if path.is_dir():
-        return [str(p) for p in sorted(path.iterdir())
-                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS]
-    return []
-
 
 def target_dimensions(width: int, height: int, long_edge: int) -> tuple[int, int]:
     """Scale up to a requested long edge without changing aspect ratio."""
@@ -73,7 +52,6 @@ def _device():
 
 
 def _pixel_unshuffle(x, scale: int):
-    import torch
     b, c, h, w = x.size()
     return (x.view(b, c, h // scale, scale, w // scale, scale)
             .permute(0, 1, 3, 5, 2, 4).reshape(b, c * scale * scale,
@@ -391,25 +369,27 @@ def main() -> int:
     parser.add_argument("--max-seconds", type=float, default=-1,
                         help="For video inputs, process only this many seconds (-1 = full video)")
     args = parser.parse_args()
-    video_files = collect_videos(args.input)
-    files = video_files or collect_images(args.input)
-    if not files:
+    try:
+        video_files = collect_videos(args.input)
+        image_files = collect_images(args.input)
+    except FileNotFoundError:
+        parser.error(f"Input not found: {args.input}")
+    if not image_files and not video_files:
         parser.error("No supported images or videos found")
     engine = RealESRGANx2(ensure_model(), tile=args.tile)
     target_box = (2064, 2208) if args.quest_3_sbs else None
-    for path in files:
-        if path in video_files:
-            upscale_video(
-                path,
-                args.output_dir,
-                engine,
-                args.long_edge,
-                target_box=target_box,
-                max_seconds=args.max_seconds,
-            )
-        else:
-            upscale_file(path, args.output_dir, engine, args.long_edge, args.format,
-                         target_box=target_box)
+    for path in image_files:
+        upscale_file(path, args.output_dir, engine, args.long_edge, args.format,
+                     target_box=target_box)
+    for path in video_files:
+        upscale_video(
+            path,
+            args.output_dir,
+            engine,
+            args.long_edge,
+            target_box=target_box,
+            max_seconds=args.max_seconds,
+        )
     return 0
 
 

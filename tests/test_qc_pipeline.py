@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -182,7 +183,7 @@ class TestBenchmarkStructureDetection(unittest.TestCase):
         if mismatches:
             details_str = "".join(details)
             self.fail(
-                f"Structure detection mismatches:\n" + "\n".join(mismatches) + details_str
+                "Structure detection mismatches:\n" + "\n".join(mismatches) + details_str
             )
 
 

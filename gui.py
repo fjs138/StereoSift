@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """StereoSift — CustomTkinter GUI.
 
-Five tabs:
+Four main tabs:
   • Judge          — local QC: pass / warning / fail / violations sorting
   • Organize       — vision-model sorting into user-defined folders
   • Upscale        — images → Quest-ready high resolution
   • Convert        — 2D images / videos → SBS 3D
-  • Tools / Rename — purge local artifacts and anonymize filenames
+
+The maintenance/rename panel remains available for development but is hidden
+from the normal app unless SANITIZE_DISPLAY is enabled below.
 
 All heavy work runs in a background thread so the UI stays responsive.
 Progress and log output stream back to the main thread via a queue.
@@ -29,15 +31,14 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import customtkinter as ctk
-
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
+from media_utils import collect_images, collect_videos, detect_input_kind
 
 # ── appearance ───────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 STATUS_COLORS = {"pass": "#2ecc71", "warning": "#f39c12", "fail": "#e74c3c"}
+SANITIZE_DISPLAY = False
 
 # Maps human-readable size label → (image model filename suffix, video encoder)
 # fp16/fp32 is resolved at runtime based on device.
@@ -102,37 +103,8 @@ def _looks_like_file_path(path: str) -> bool:
 
 def _input_kind(path: str) -> str:
     """Return image, video, mixed, folder, missing, or unknown for a file/folder."""
-    expanded = os.path.abspath(os.path.expanduser(path.strip()))
-    if not expanded:
-        return "unknown"
-    if os.path.isfile(expanded):
-        ext = os.path.splitext(expanded)[1].lower()
-        if ext in VIDEO_EXTENSIONS:
-            return "video"
-        if ext in IMAGE_EXTENSIONS:
-            return "image"
-        return "unknown"
-    if os.path.isdir(expanded):
-        has_images = False
-        has_videos = False
-        try:
-            for name in os.listdir(expanded):
-                child = os.path.join(expanded, name)
-                if not os.path.isfile(child):
-                    continue
-                ext = os.path.splitext(name)[1].lower()
-                has_images = has_images or ext in IMAGE_EXTENSIONS
-                has_videos = has_videos or ext in VIDEO_EXTENSIONS
-                if has_images and has_videos:
-                    return "mixed"
-        except OSError:
-            return "unknown"
-        if has_videos:
-            return "video"
-        if has_images:
-            return "image"
-        return "folder"
-    return "missing"
+    kind = detect_input_kind(path)
+    return "unknown" if kind == "empty" else kind
 
 
 def _suggest_output_path(path: str, output_suffix: str, *, is_file: bool) -> str:
@@ -783,8 +755,8 @@ class ConvertTab(ctk.CTkFrame):
             self._input_type_var.set("Video detected")
             self._apply_input_kind("video")
         elif kind == "mixed":
-            self._input_type_var.set("Mixed folder — videos selected")
-            self._apply_input_kind("video")
+            self._input_type_var.set("Mixed folder — images and videos selected")
+            self._apply_input_kind("mixed")
         elif kind == "image":
             self._input_type_var.set("Image detected")
             self._apply_input_kind("image")
@@ -862,7 +834,7 @@ class ConvertTab(ctk.CTkFrame):
         self._log.start_spin()
         preview_seconds = 5 if self._video_preview_var.get() == "First 5 seconds" else 0
         detected_kind = self._detected_input_kind()
-        input_kind = "video" if detected_kind in {"video", "mixed"} else "image"
+        input_kind = detected_kind if detected_kind in {"image", "video", "mixed"} else "image"
         opts = ConvertOptions(
             input_path=inp,
             output_dir=out,
@@ -916,11 +888,14 @@ class ConvertTab(ctk.CTkFrame):
         control = lambda: _respect_worker_controls(stop_event, pause_event)
         log = _make_controlled_log(q, stop_event, pause_event)
         try:
-            import torch
-            from convert import get_device, collect_images, collect_videos, convert_one
+            from convert import get_device, convert_one
 
             device    = get_device()
-            is_video  = opts.is_video
+            image_files = collect_images(opts.input_path) if not opts.is_video else []
+            video_files = collect_videos(opts.input_path) if opts.input_kind in {"video", "mixed"} else []
+            total_files = len(image_files) + len(video_files)
+            if total_files == 0:
+                raise ValueError(f"No supported images or videos found in {opts.input_path}")
             started_at = time.perf_counter()
             report: dict[str, object] = {
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -928,77 +903,20 @@ class ConvertTab(ctk.CTkFrame):
                 "device": str(device),
                 "files": [],
             }
+            processed_files = 0
 
-            if is_video:
-                from video_converter import (
-                    load_video_depth_model, convert_video_to_sbs)
-                encoder = _VID_ENCODERS[opts.size]
-                q.put(("log",
-                       f"Loading Video Depth Anything — {opts.size} ({encoder})…"))
-                model, dtype, is_metric = load_video_depth_model(
-                    encoder=encoder, device=device)
-                files = collect_videos(opts.input_path)
-                q.put(("log", f"Found {len(files)} video(s)"))
-                max_res = opts.video_max_res
-                if device.type == "mps" and max_res == 1280:
-                    max_res = 720
-                    q.put(("log", "Apple Silicon safety limit: using 720 video max size."))
-                target_fps = opts.video_target_fps
-                if opts.video_preview_seconds > 0:
-                    q.put(("log", f"Preview mode: processing about the first {opts.video_preview_seconds} seconds."))
-                for i, path in enumerate(files):
-                    control()
-                    q.put(("progress", i, len(files)))
-                    q.put(("log",
-                           f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
-                    ok = convert_video_to_sbs(
-                        video_path=path,
-                        output_dir=opts.output_dir,
-                        model=model, device=device,
-                        dtype=dtype, is_metric=is_metric,
-                        sbs_method=opts.method,
-                        depth_scale=opts.depth_scale,
-                        sbs_mode=opts.sbs_mode,
-                        sbs_blur=opts.sbs_blur,
-                        max_res=max_res,
-                        input_size=opts.video_input_size,
-                        target_fps=target_fps,
-                        max_seconds=opts.video_preview_seconds if opts.video_preview_seconds > 0 else -1,
-                        depth_only=opts.depth_only,
-                        log=log,
-                        control=control,
-                        progress=lambda done, total, file_index=i: q.put((
-                            "progress_detail",
-                            done,
-                            total,
-                            f"Video {file_index + 1}/{len(files)} frames",
-                        )),
-                    )
-                    suffix = "depth" if opts.depth_only else "SBS_LR"
-                    output_path = os.path.join(
-                        opts.output_dir,
-                        f"{os.path.splitext(os.path.basename(path))[0]}_{suffix}{os.path.splitext(path)[1]}",
-                    )
-                    report["files"].append({
-                        "input": path,
-                        "output": output_path,
-                        "success": ok,
-                    })
-                    control()
-                    q.put(("progress", i + 1, len(files)))
-            else:
+            if image_files:
                 from depth_model import load_depth_model
                 model_name = _resolve_img_model(opts.size, device.type)
                 q.put(("log",
                        f"Loading DepthAnythingV2 — {opts.size} ({model_name})…"))
                 model, dtype, is_metric = load_depth_model(model_name, device)
-                files = collect_images(opts.input_path)
-                q.put(("log", f"Found {len(files)} image(s)"))
-                for i, path in enumerate(files):
+                q.put(("log", f"Found {len(image_files)} image(s)"))
+                for path in image_files:
                     control()
-                    q.put(("progress", i, len(files)))
+                    q.put(("progress", processed_files, total_files))
                     q.put(("log",
-                           f"[{i+1}/{len(files)}] {os.path.basename(path)}"))
+                           f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}"))
                     ok = convert_one(
                         model, path, opts.output_dir,
                         device, dtype, is_metric,
@@ -1015,17 +933,78 @@ class ConvertTab(ctk.CTkFrame):
                     )
                     report["files"].append({
                         "input": path,
+                        "type": "image",
                         "success": ok,
                     })
+                    processed_files += 1
                     control()
-                    q.put(("progress", i + 1, len(files)))
+                    q.put(("progress", processed_files, total_files))
+
+            if video_files:
+                from video_converter import (
+                    load_video_depth_model, convert_video_to_sbs)
+                encoder = _VID_ENCODERS[opts.size]
+                q.put(("log",
+                       f"Loading Video Depth Anything — {opts.size} ({encoder})…"))
+                model, dtype, is_metric = load_video_depth_model(
+                    encoder=encoder, device=device)
+                q.put(("log", f"Found {len(video_files)} video(s)"))
+                max_res = opts.video_max_res
+                if device.type == "mps" and max_res == 1280:
+                    max_res = 720
+                    q.put(("log", "Apple Silicon safety limit: using 720 video max size."))
+                target_fps = opts.video_target_fps
+                if opts.video_preview_seconds > 0:
+                    q.put(("log", f"Preview mode: processing about the first {opts.video_preview_seconds} seconds."))
+                for video_index, path in enumerate(video_files):
+                    control()
+                    q.put(("progress", processed_files, total_files))
+                    q.put(("log",
+                           f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}"))
+                    ok = convert_video_to_sbs(
+                        video_path=path,
+                        output_dir=opts.output_dir,
+                        model=model, device=device,
+                        dtype=dtype, is_metric=is_metric,
+                        sbs_method=opts.method,
+                        depth_scale=opts.depth_scale,
+                        sbs_mode=opts.sbs_mode,
+                        sbs_blur=opts.sbs_blur,
+                        max_res=max_res,
+                        input_size=opts.video_input_size,
+                        target_fps=target_fps,
+                        max_seconds=opts.video_preview_seconds if opts.video_preview_seconds > 0 else -1,
+                        depth_only=opts.depth_only,
+                        log=log,
+                        control=control,
+                        progress=lambda done, total, file_index=video_index: q.put((
+                            "progress_detail",
+                            done,
+                            total,
+                            f"Video {file_index + 1}/{len(video_files)} frames",
+                        )),
+                    )
+                    suffix = "depth" if opts.depth_only else "SBS_LR"
+                    output_path = os.path.join(
+                        opts.output_dir,
+                        f"{os.path.splitext(os.path.basename(path))[0]}_{suffix}{os.path.splitext(path)[1]}",
+                    )
+                    report["files"].append({
+                        "input": path,
+                        "type": "video",
+                        "output": output_path,
+                        "success": ok,
+                    })
+                    processed_files += 1
+                    control()
+                    q.put(("progress", processed_files, total_files))
 
             report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             report["seconds"] = round(time.perf_counter() - started_at, 3)
             report_path = os.path.join(opts.output_dir, "conversion_report.json")
             _write_json_report(report_path, report)
             q.put(("log", f"Report saved: {report_path}"))
-            q.put(("done", f"Finished — {len(files)} file(s) converted."))
+            q.put(("done", f"Finished — {total_files} file(s) converted."))
         except _RunCancelled:
             q.put(("stopped", "Conversion cancelled by user."))
         except Exception:
@@ -1223,7 +1202,7 @@ class UpscaleTab(ctk.CTkFrame):
             self._input_type_var.set("Video detected — will upscale video frames and preserve audio.")
             self._format_menu.configure(state="disabled")
         elif kind == "mixed":
-            self._input_type_var.set("Mixed folder — videos selected for upscaling.")
+            self._input_type_var.set("Mixed folder — will upscale images and videos.")
             self._format_menu.configure(state="disabled")
         elif kind == "image":
             self._input_type_var.set("Image detected — will upscale image file(s).")
@@ -1272,51 +1251,61 @@ class UpscaleTab(ctk.CTkFrame):
         log = _make_controlled_log(self._q, stop_event, pause_event)
         try:
             from upscaler import (
-                collect_images,
-                collect_videos,
                 ensure_model,
                 RealESRGANx2,
                 upscale_file,
                 upscale_video,
             )
             kind = _input_kind(inp)
-            is_video = kind in {"video", "mixed"}
-            files = collect_videos(inp) if is_video else collect_images(inp)
-            if not files:
-                raise ValueError(f"No supported {'videos' if is_video else 'images'} found in {inp}")
+            image_files = collect_images(inp) if kind in {"image", "mixed"} else []
+            video_files = collect_videos(inp) if kind in {"video", "mixed"} else []
+            total_files = len(image_files) + len(video_files)
+            if total_files == 0:
+                raise ValueError(f"No supported images or videos found in {inp}")
             model_path = ensure_model(log=log, control=control)
             log(f"Loading Real-ESRGAN x2plus (tile {tile})…")
             engine = RealESRGANx2(model_path, tile=tile)
-            label = "video" if is_video else "image"
-            log(f"Found {len(files)} {label}(s); device: {engine.device}")
-            for index, path in enumerate(files):
+            log(
+                f"Found {len(image_files)} image(s) and {len(video_files)} video(s); "
+                f"device: {engine.device}"
+            )
+            processed_files = 0
+            for path in image_files:
                 control()
-                self._q.put(("progress", index, len(files)))
-                log(f"[{index + 1}/{len(files)}] {os.path.basename(path)}")
+                self._q.put(("progress", processed_files, total_files))
+                log(f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}")
                 target_box = target if isinstance(target, tuple) else None
                 long_edge = target if isinstance(target, int) else max(target)
-                if is_video:
-                    upscale_video(
-                        path,
-                        out,
-                        engine,
-                        long_edge,
-                        target_box=target_box,
-                        log=log,
-                        control=control,
-                        progress=lambda done, total, file_index=index: self._q.put((
-                            "progress_detail",
-                            done,
-                            total,
-                            f"Video {file_index + 1}/{len(files)} frames",
-                        )),
-                    )
-                else:
-                    upscale_file(path, out, engine, long_edge, output_format, log,
-                                 target_box=target_box, control=control)
+                upscale_file(path, out, engine, long_edge, output_format, log,
+                             target_box=target_box, control=control)
+                processed_files += 1
                 control()
-                self._q.put(("progress", index + 1, len(files)))
-            self._q.put(("done", f"Finished — {len(files)} {label}(s) upscaled."))
+                self._q.put(("progress", processed_files, total_files))
+            for video_index, path in enumerate(video_files):
+                control()
+                self._q.put(("progress", processed_files, total_files))
+                log(f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}")
+                target_box = target if isinstance(target, tuple) else None
+                long_edge = target if isinstance(target, int) else max(target)
+                upscale_video(
+                    path,
+                    out,
+                    engine,
+                    long_edge,
+                    target_box=target_box,
+                    log=log,
+                    control=control,
+                    progress=lambda done, total, file_index=video_index: self._q.put((
+                        "progress_detail",
+                        done,
+                        total,
+                        f"Video {file_index + 1}/{len(video_files)} frames",
+                    )),
+                )
+                processed_files += 1
+                control()
+                self._q.put(("progress", processed_files, total_files))
+            self._q.put(("done", f"Finished — {total_files} file(s) upscaled."))
         except _RunCancelled:
             self._q.put(("stopped", "Upscaling cancelled by user."))
         except Exception:
@@ -1695,7 +1684,6 @@ class JudgeTab(ctk.CTkFrame):
             1 for r in self._results
             if r.get("route_folder") == "unscored"
         )
-        total = max(processed, 0)
         self._processed_var.set(f"Processed: {processed}")
         self._pass_var.set(f"Pass: {counts['pass']}")
         self._warn_var.set(f"Warning: {counts['warning']}")
@@ -2732,18 +2720,25 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"),
             text_color="#7eb3ff",
         ).pack(side="left", padx=16, pady=10)
-        ctk.CTkLabel(
-            hdr, text="Image QC  ·  AI Organize  ·  AI Upscale  ·  2D → SBS 3D  ·  Tools / Rename",
-            text_color="#666",
-        ).pack(side="left", pady=10)
+        subtitle = "Image QC  ·  AI Organize  ·  AI Upscale  ·  2D → SBS 3D"
+        if SANITIZE_DISPLAY:
+            subtitle += "  ·  Tools / Rename"
+        ctk.CTkLabel(hdr, text=subtitle, text_color="#666").pack(side="left", pady=10)
 
         # Tabs
         tabs = ctk.CTkTabview(self)
         tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
 
-        for name, cls in [("Judge", JudgeTab), ("Organize", OrganizeTab),
-                          ("Upscale", UpscaleTab), ("Convert", ConvertTab),
-                          ("Tools / Rename", SanitizeTab)]:
+        tab_specs = [
+            ("Judge", JudgeTab),
+            ("Organize", OrganizeTab),
+            ("Upscale", UpscaleTab),
+            ("Convert", ConvertTab),
+        ]
+        if SANITIZE_DISPLAY:
+            tab_specs.append(("Tools / Rename", SanitizeTab))
+
+        for name, cls in tab_specs:
             tabs.add(name)
             tabs.tab(name).grid_columnconfigure(0, weight=1)
             tabs.tab(name).grid_rowconfigure(0, weight=1)
