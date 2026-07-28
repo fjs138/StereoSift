@@ -306,8 +306,10 @@ inline over localhost.
 
 ## License
 
-This project incorporates code and model integrations derived from
-[Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) and
-[Video Depth Anything](https://github.com/DepthAnything/Video-Depth-Anything).
-Consult the upstream license files before commercial use, especially for the
-Base and Large checkpoints.
+StereoSift uses and incorporates third-party software, source code,
+architectures, and model checkpoints. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the attribution,
+upstream links, license information, and the specific role of each component.
+
+Model licenses may differ from the licenses of their implementation code.
+Check the exact checkpoint license before redistribution or commercial use.
