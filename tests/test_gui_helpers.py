@@ -169,8 +169,8 @@ class TestGuiBrowseHelpers(unittest.TestCase):
 
     def test_merge_backend_model_choices_preserves_order_and_dedupes(self):
         merged = _merge_backend_model_choices(
-            ["Qwen3.6-35B-A3B-MLX-4bit", "gemma-3-27b-it-8bit"],
-            ["gemma-3-27b-it-8bit", "custom-model"],
+            ["Qwen3.6-35B-A3B-MLX-4bit", "gemma-3-27b-it-4bit"],
+            ["gemma-3-27b-it-4bit", "custom-model"],
             ["CUSTOM-model"],
         )
 
@@ -178,7 +178,7 @@ class TestGuiBrowseHelpers(unittest.TestCase):
             merged,
             [
                 "Qwen3.6-35B-A3B-MLX-4bit",
-                "gemma-3-27b-it-8bit",
+                "gemma-3-27b-it-4bit",
                 "custom-model",
             ],
         )

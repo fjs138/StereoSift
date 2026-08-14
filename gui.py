@@ -46,11 +46,10 @@ STATUS_COLORS = {"pass": "#2ecc71", "warning": "#f39c12", "fail": "#e74c3c"}
 _SIZE_LABELS   = ["Small", "Base", "Large"]
 _IMG_ENCODERS  = {"Small": "vits", "Base": "vitb", "Large": "vitl"}
 _VID_ENCODERS  = {"Small": "vits", "Base": "vitb", "Large": "vitl"}
+# Seed value only. The real list is discovered from the backend's /models
+# endpoint via Refresh; this exists so the menu is never empty on first launch.
 _BACKEND_MODEL_CHOICES = [
-    "gemma-3-27b-it-4bit",
-    "gemma-3-27b-it-8bit",
-    "Qwen3.6-35B-A3B-MLX-8bit",
-    "Qwen3.6-35B-A3B-Instruct-MLX-4bit",
+    "Qwen3.6-35B-A3B-MLX-4bit",
 ]
 _MODEL_SELECTED_PREFIX = "[Selected] "
 @dataclass(frozen=True)
