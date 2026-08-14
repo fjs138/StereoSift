@@ -118,8 +118,8 @@ network-capable behavior at all.
 | `sbs/sbs.py` | SBS warping and conversion helpers |
 | `tests/` | Automated tests |
 | `models/` | Downloaded checkpoints |
-| `video_depth_anything_repo/` | Vendored Video Depth Anything code |
-| `depth_anything_v2/` | Depth Anything V2 implementation |
+| `video_depth_anything_repo/` | Vendored upstream — Video Depth Anything ([license](THIRD_PARTY_NOTICES.md)) |
+| `depth_anything_v2/` | Vendored upstream — Depth Anything V2 ([license](THIRD_PARTY_NOTICES.md)) |
 
 ## Installation
 
