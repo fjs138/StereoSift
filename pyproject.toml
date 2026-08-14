@@ -1,5 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the project root importable so `pytest` behaves like `python -m pytest`.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
