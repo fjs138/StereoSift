@@ -56,8 +56,8 @@ Four tabs, one window. Everything runs on your machine.
 | Depth Anything V2 | Image depth | Converts 2D images into SBS 3D |
 | Video Depth Anything | Video depth | Converts videos frame by frame with temporal consistency |
 | Real-ESRGAN x2plus | Image upscaling | Restores detail in tiled x2 passes before an exact target resize |
-| YOLO11n | QC pose gate | Finds people and catches obvious structural artifacts in the QC flow |
-| Moondream2 | QC fallback scan | Checks tricky structural artifacts when the pose rules are not enough |
+| YOLO11n | QC subject gate | Detects subjects and flags obvious structural artifacts in the QC flow |
+| Moondream2 | QC fallback scan | Checks tricky structural artifacts when the fast checks are not enough |
 | LM Studio / oMLX | Optional backend | Local vision backend for stronger QC when you want it |
 | requests | HTTP client | Talks to the optional backend |
 | Pillow | Image handling | Loads, resizes, and saves images |
@@ -89,8 +89,8 @@ images and frame-by-frame video upscaling.
 Judge has two mutually exclusive paths. By default it sends each image to an
 OpenAI-compatible vision backend (LM Studio, oMLX, Ollama) and uses that single
 judgment. Clear the backend URL and it falls back to local models instead:
-pixel heuristics always, YOLO person/object detection by default, and an
-optional moondream2 deep scan for duplicated or incorrectly joined structure.
+pixel heuristics always, YOLO subject/object detection by default, and an
+optional moondream2 deep scan for duplicated or incorrectly joined structures.
 Organize asks an OpenAI-compatible vision model to choose exactly one of your
 category labels for each image, then copies or moves it into that subfolder.
 
@@ -105,7 +105,7 @@ network-capable behavior at all.
 * Triage AI-generated portraits or character images for obvious structural defects.
 * Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
 
-## Structure of Project
+## Project Structure
 
 | File/Folder | Purpose |
 | :-- | :-- |
@@ -154,7 +154,7 @@ python gui.py
 Visible tabs:
 
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
-  person counts, issues, and optional structural notes when the fallback scan is on.
+  subject counts, issues, and optional structural notes when the fallback scan is on.
   Recursive input preserves the source subfolder structure under each status.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
@@ -221,7 +221,7 @@ sits when you view red-cyan output.
 ## Image QC
 
 ```bash
-# Basic: exposure and contrast checks + YOLO person/object detection
+# Basic: exposure and contrast checks + YOLO subject/object detection
 python qc_pipeline.py --input ~/Pictures/to-review --output-dir output/qc
 
 # With structural scan
@@ -254,11 +254,11 @@ affect the verdict.
 | Layer | Model | What it catches |
 | :-- | :-- | :-- |
 | Pixel metrics | None | Records exposure and contrast for reference |
-| Pose structure gate | YOLO11n (~6 MB) | Person presence, object count, and obvious duplicate or fused human features |
-| Structural scan | moondream2 fallback (~2 GB) | Tricky structural defects when the pose gate is not enough |
+| Structure gate | YOLO11n (~6 MB) | Subject presence, object count, and obvious duplicate or fused features |
+| Structural scan | moondream2 fallback (~2 GB) | Tricky structural defects when the structure gate is not enough |
 
-YOLO and moondream2 download automatically on first use. The pose gate runs
-first on person images, and the moondream2 fallback only kicks in after that
+YOLO and moondream2 download automatically on first use. The structure gate runs
+first on images with subjects, and the moondream2 fallback only kicks in after that
 unless you are in strict offline mode.
 
 Strict offline mode disables those model-backed checks entirely, so the QC path
