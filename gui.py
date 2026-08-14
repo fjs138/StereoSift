@@ -2036,7 +2036,7 @@ class OrganizeTab(ctk.CTkFrame):
         self._labels_entry = ctk.CTkEntry(
             opts,
             textvariable=self._labels_var,
-            placeholder_text="outdoors, indoors  or  color, black-and-white",
+            placeholder_text="outdoors, indoors  or  places, people",
         )
         self._labels_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(8, 4))
         ctk.CTkLabel(
