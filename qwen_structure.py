@@ -31,9 +31,9 @@ DEFAULT_BACKEND_MODEL = "Qwen3.6-35B-A3B-MLX-4bit"
 STRUCTURE_PROMPT = """Act as a conservative structural-anatomy quality inspector.
 
 Your only job is to decide whether visible human bodies have major structural
-defects. Ignore scene meaning, artistic intent, clothing, style, lighting,
+anatomy defects. Ignore scene meaning, artistic intent, clothing, style, lighting,
 and background. Do not mention or classify any
-non-structure subject matter.
+non-anatomy subject matter.
 
 Trace every visible head downward through its neck, shoulders, upper torso, and
 pelvis or lower body. Do not assume that two faces represent two valid people
@@ -46,7 +46,7 @@ Send the image to failure review when any of these is clear or reasonably likely
 - two heads connect to one torso or one shared body chain;
 - two upper torsos converge into one pelvis or lower body;
 - a full extra arm or leg attaches to one body;
-- bodies visibly fuse, intersect, or share structure.
+- bodies visibly fuse, intersect, or share anatomy.
 
 Normal people who merely overlap must pass when their body chains remain visibly
 distinct. Ignore hands, fingers, facial beauty, lighting, clothing details, and
@@ -71,7 +71,7 @@ Decision rules:
 
 Examples:
 Output for no people:
-{"status":"pass","defect_type":"none","confidence":1.0,"evidence":"No human body structure is visible.","review":false}
+{"status":"pass","defect_type":"none","confidence":1.0,"evidence":"No human anatomy is visible.","review":false}
 
 Output for two normal nearby people:
 {"status":"pass","defect_type":"none","confidence":0.98,"evidence":"Each visible head connects to a separate neck, torso, and lower body.","review":false}
@@ -294,7 +294,7 @@ class QwenStructureJudge:
             if model_type and "vl" not in str(model_type).lower():
                 raise RuntimeError(
                     f"{model_path} looks like a text-only model ({model_type!r}), not a "
-                    "vision-language model. The structure judge needs a Qwen-VL checkpoint "
+                    "vision-language model. The anatomy judge needs a Qwen-VL checkpoint "
                     "or an OpenAI-compatible backend."
                 )
 
@@ -327,7 +327,7 @@ class QwenStructureJudge:
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": {
-                            "name": "structure_verdict",
+                            "name": "anatomy_verdict",
                             "strict": True,
                             "schema": _STRUCTURE_RESPONSE_SCHEMA,
                         },
@@ -337,7 +337,7 @@ class QwenStructureJudge:
                             "role": "system",
                             "content": (
                                 "You are a strict image QC judge. Base the verdict only on "
-                                "visible human body structure in the supplied image."
+                                "visible human anatomy in the supplied image."
                             ),
                         },
                         {
