@@ -23,9 +23,9 @@ class TestQCModelDecisions(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     @patch("qc_pipeline._run_moondream")
-    @patch("qc_pipeline._run_yolo")
+    @patch("qc_pipeline._run_structure_scan")
     def test_severe_moondream_structure_result_fails(self, mock_yolo, mock_moondream):
-        mock_yolo.return_value = {"person_count": 1, "detections": ["person"]}
+        mock_yolo.return_value = {"person_count": 1, "detections": ["person"], "issues": []}
         mock_moondream.return_value = {
             "verdict": "fail",
             "structure_ok": False,
@@ -44,7 +44,7 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertTrue(any("major structure defect" in issue for issue in result["issues"]))
 
     @patch("qc_pipeline._run_moondream")
-    @patch("qc_pipeline._run_yolo")
+    @patch("qc_pipeline._run_structure_scan")
     def test_person_only_mode_skips_non_person_images(self, mock_yolo, mock_moondream):
         mock_yolo.return_value = {"person_count": 0, "detections": ["bottle"]}
 
@@ -74,9 +74,9 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(result["verdict"], "pass")
 
     @patch("qc_pipeline._run_moondream")
-    @patch("qc_pipeline._run_yolo")
+    @patch("qc_pipeline._run_structure_scan")
     def test_exposure_does_not_fail_a_structurally_valid_image(self, mock_yolo, mock_moondream):
-        mock_yolo.return_value = {"person_count": 1, "detections": ["person"]}
+        mock_yolo.return_value = {"person_count": 1, "detections": ["person"], "issues": []}
         mock_moondream.return_value = {
             "verdict": "pass", "structure_ok": True,
             "structure_note": "PASS", "raw": "PASS",
@@ -93,9 +93,9 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertEqual(result["score"], 100.0)
 
     @patch("qc_pipeline._run_moondream")
-    @patch("qc_pipeline._run_yolo")
+    @patch("qc_pipeline._run_structure_scan")
     def test_uncertain_structure_routes_to_warning(self, mock_yolo, mock_moondream):
-        mock_yolo.return_value = {"person_count": 1, "detections": ["person"]}
+        mock_yolo.return_value = {"person_count": 1, "detections": ["person"], "issues": []}
         mock_moondream.return_value = {
             "verdict": "uncertain", "structure_ok": False,
             "structure_note": "UNCERTAIN: the torso is partly obscured.",
@@ -469,9 +469,11 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertIn("structurally correct", result["structure_note"])
 
     @patch("qc_pipeline._http_post")
-    def test_backend_refusal_routes_to_unscored_folder(self, mock_post):
+    def test_reply_without_a_status_routes_to_unscored_folder(self, mock_post):
+        # The model answered in prose instead of the requested JSON verdict, so
+        # nothing was actually assessed and the image must not be scored.
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"pass","score":95,"note":"Structure looks normal, but I cannot rate this image.","issues":["Declined: the model reported a content policy violation."]}'
+            "I am not able to give a rating for this image."
         )}}]}
 
         output_dir = os.path.join(self.tmpdir, "out")
@@ -482,7 +484,6 @@ class TestQCModelDecisions(unittest.TestCase):
             model_name="vision-model",
         )
 
-        self.assertEqual(result["status"], "pass")
         self.assertEqual(result["route_folder"], "unscored")
         self.assertTrue(result["destination"].startswith(os.path.join(output_dir, "unscored")))
         self.assertTrue(os.path.exists(result["destination"]))

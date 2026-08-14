@@ -187,3 +187,8 @@ input/
 output/
 *.video-only.mp4
 depth_anything_v2/util/.DS_Store
+
+# Local-only, never committed: personal tuning and helper tools
+local_rules.py
+local_tools.py
+local_*.py

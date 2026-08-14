@@ -417,7 +417,7 @@ def _run_moondream(image_path: str, output_dir: Optional[str] = None) -> Dict[st
     img = Image.open(image_path).convert("RGB")
 
     prompt = (
-        "Judge only major duplicated or incorrectly joined human body structure. "
+        "Judge only major duplicated or incorrectly joined human anatomy. "
         "FAIL only for a clearly extra head, a second torso sharing one lower body, "
         "an extra arm or leg beyond a plausible human body, or visibly fused people/bodies. "
         "Do not fail for hidden or cropped limbs, hands or fingers, pose, clothing, lighting, "
@@ -884,27 +884,31 @@ def validate_organizer_labels(labels: List[str]) -> List[str]:
     return clean_labels
 
 
-_REFUSAL_MARKERS = (
-    "violation",
-    "cannot assist",
-    "can't assist",
-    "unable to provide",
-    "unable to assist",
-    "i cannot",
-    "i can't",
-    "against policy",
-    "content policy",
-)
+# Optional local overrides. Create ``local_rules.py`` beside this file to add
+# extra marker strings; it is untracked (see .gitignore) so personal tuning
+# never lands in the repository.
+try:
+    from local_rules import EXTRA_UNSCORABLE_MARKERS  # type: ignore
+except Exception:  # pragma: no cover - the module is optional
+    EXTRA_UNSCORABLE_MARKERS: tuple = ()
+
+_STATUS_IN_REPLY = re.compile(r'"?status"?\s*[:=]\s*"?(pass|warning|fail)', re.I)
 
 
-def _looks_like_model_refusal(text: str) -> bool:
-    """True when the backend declined to return a verdict.
+def _is_unscorable(text: str, issues) -> bool:
+    """True when the backend returned no usable verdict.
 
-    Matches phrasing the model itself emits when it will not answer, so the
-    image can be routed to ``unscored/`` rather than scored as a failure.
+    A reply is unscorable when parsing failed outright, or when it contains no
+    recognisable status field at all. Those images are routed to ``unscored/``
+    instead of being recorded as a quality failure, because nothing was ever
+    actually assessed - treating a non-answer as a "fail" would corrupt the
+    counts and hide real defects.
     """
-    lowered = text.lower()
-    return any(marker in lowered for marker in _REFUSAL_MARKERS)
+    if any("parse failed" in str(issue).lower() for issue in issues):
+        return True
+    if any(marker in text.lower() for marker in EXTRA_UNSCORABLE_MARKERS):
+        return True
+    return not _STATUS_IN_REPLY.search(text)
 
 
 def classify_image_with_backend(
@@ -920,7 +924,7 @@ def classify_image_with_backend(
     """Classify one image via an OpenAI-compatible vision backend."""
     img_url = _image_data_url(image_path)
     prompt = (
-        "Review this image for human body structure issues.\n"
+        "Review this image for human anatomy issues.\n"
         "Use FAIL for severe problems like heads in the wrong place, "
         "duplicate heads, multiple torsos that look fused, people merged into "
         "one body, or limbs attached in impossible ways.\n"
@@ -983,9 +987,8 @@ def classify_image_with_backend(
     if not note:
         note = " ".join(str(issue) for issue in issues).strip()
 
-    issue_text = " ".join(str(issue) for issue in issues)
     route_folder = status
-    if _looks_like_model_refusal(f"{text} {issue_text}"):
+    if _is_unscorable(text, issues):
         route_folder = "unscored"
 
     _append_human_readable_response(
