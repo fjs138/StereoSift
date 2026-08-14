@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
 """Image quality-control pipeline.
 
-Two complementary local checks, both running through PyTorch with no server:
+Two mutually exclusive judging paths. Which one runs is decided by whether a
+backend URL is supplied (see ``run_qc``):
 
-1. Pixel heuristics (always)
-   Exposure, brightness, contrast — fast, zero model dependencies.
+A. Vision backend (the default in the GUI)
+   An OpenAI-compatible server — LM Studio, oMLX, Ollama — judges each image in
+   a single request. This is the primary path; the local models below are not
+   loaded or consulted at all when it is active. Malformed responses degrade to
+   a "warning" so a bad reply cannot stall a batch.
 
-2. YOLO object detection (optional, enabled by default)
-   ``yolo11n.pt`` (~6 MB, auto-downloaded to ``models/yolo/``)
-   Detects persons and objects. Honest scope: reports person count and
-   detected object classes. Does NOT claim to detect fused figures —
-   YOLO pose produces one skeleton per person instance and cannot reliably
-   flag two heads on one body.
+B. Local models (used when no backend URL is set, or in strict offline mode)
+   1. Pixel heuristics (always)
+      Exposure, brightness, contrast — fast, zero model dependencies.
+   2. YOLO object detection (``use_yolo``, on by default)
+      ``yolo11n.pt`` (~6 MB, auto-downloaded to ``models/yolo/``). Reports
+      person count and detected object classes. Honest scope: it does NOT
+      detect fused figures — YOLO pose emits one skeleton per person instance
+      and cannot flag two heads on one body.
+   3. Deep scan (``use_deep_scan``, OFF by default)
+      moondream2 (~2 GB) actually reasons about duplicated or incorrectly
+      joined structure. Gated by ``deep_scan_persons_only`` so it only runs on
+      images where a person was found.
 
-3. Pose / structure scan (optional, off by default)
-   YOLO pose checks the people in the image for obvious duplicate torsos or
-   heads. If enabled, a local LLM scan can still act as a fallback for tricky
-   cases, but it is no longer the only structure judge.
-
-Optional fourth path: OpenAI-compatible vision backend (LM Studio, Ollama).
-Pass ``backend_url`` to replace the local moondream2 scan with an API call.
+Strict offline mode forces path B and additionally disables YOLO and the deep
+scan, leaving pixel-only QC and no network-capable behaviour.
 
 Output
 ------
 ``<output_dir>/pass/``, ``warning/``, ``fail/``, ``unscored/``
+
+Originals are copied by default; pass ``move_files=True`` to move instead.
 """
 
 from __future__ import annotations

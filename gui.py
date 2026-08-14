@@ -1657,7 +1657,9 @@ class JudgeTab(ctk.CTkFrame):
 
     def _set_backend_models(self, models: list[str]) -> None:
         current = _strip_model_menu_label(self._backend_model_var.get())
-        self._backend_models = _merge_backend_model_choices(models, [current])
+        self._backend_models = _merge_backend_model_choices(
+            models, [current], _BACKEND_MODEL_CHOICES
+        )
         self._backend_model_menu.configure(
             values=_decorate_model_menu_values(self._backend_models, current)
         )
@@ -2164,7 +2166,9 @@ class OrganizeTab(ctk.CTkFrame):
 
     def _set_backend_models(self, models: list[str]) -> None:
         current = _strip_model_menu_label(self._model_var.get())
-        self._backend_models = _merge_backend_model_choices(models, [current])
+        self._backend_models = _merge_backend_model_choices(
+            models, [current], _BACKEND_MODEL_CHOICES
+        )
         self._model_menu.configure(
             values=_decorate_model_menu_values(self._backend_models, current)
         )

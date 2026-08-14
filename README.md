@@ -72,18 +72,17 @@ StereoSift has four main visible paths.
 Convert uses Depth Anything V2 for images and Video Depth Anything for video.
 Upscale uses Real-ESRGAN x2plus with tiled inference and aspect-safe sizing for
 images and frame-by-frame video upscaling.
-Judge uses pixel checks first, then YOLO for person/object detection and common
-structural artifacts, with an optional fallback scan when you want a second
-opinion.
+Judge has two mutually exclusive paths. By default it sends each image to an
+OpenAI-compatible vision backend (LM Studio, oMLX, Ollama) and uses that single
+judgment. Clear the backend URL and it falls back to local models instead:
+pixel heuristics always, YOLO person/object detection by default, and an
+optional moondream2 deep scan for duplicated or incorrectly joined structure.
 Organize asks an OpenAI-compatible vision model to choose exactly one of your
 category labels for each image, then copies or moves it into that subfolder.
 
-There is also an optional local backend path for Judge. If you point it at LM
-Studio or oMLX, StereoSift sends the image to that server instead of using the
-local moondream2 scan.
-
-Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
-is the safest choice if you want no network-capable behavior at all.
+Strict offline mode forces the local path and additionally turns off YOLO and
+the deep scan, leaving pixel-only QC. That is the safest choice if you want no
+network-capable behavior at all.
 
 ## Example Workflows
 
@@ -279,7 +278,7 @@ If you already have a local vision model running in LM Studio or oMLX, you can
 point the Judge tab at it.
 
 * LM Studio: `http://127.0.0.1:1234/v1`
-* oMLX: `http://127.0.0.1:8000/v1`
+* oMLX: `http://127.0.0.1:8001/v1` (matches the app's default; use whatever port your server reports)
 
 The full `/v1/chat/completions` URL is also accepted. If authentication is on,
 paste the Bearer token into the API key field or pass it with `--api-key`.
