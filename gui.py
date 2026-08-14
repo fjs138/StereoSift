@@ -1903,7 +1903,7 @@ class JudgeTab(ctk.CTkFrame):
                    f"✓ {counts['pass']} pass   "
                    f"⚠ {counts['warning']} warning   "
                    f"✗ {counts['fail']} fail   "
-                   f"⛔ {unscored} violations"))
+                   f"⛔ {unscored} unscored"))
         except _RunCancelled:
             q.put(("stopped", "QC cancelled by user. Partial results were kept."))
         except Exception:
