@@ -32,8 +32,7 @@ STRUCTURE_PROMPT = """Act as a conservative structural-anatomy quality inspector
 
 Your only job is to decide whether visible human bodies have major structural
 anatomy defects. Ignore scene meaning, artistic intent, clothing, style, lighting,
-and background. Do not mention or classify any
-non-anatomy subject matter.
+and background. Do not mention or classify any non-anatomy subject matter.
 
 Trace every visible head downward through its neck, shoulders, upper torso, and
 pelvis or lower body. Do not assume that two faces represent two valid people
