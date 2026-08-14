@@ -31,7 +31,12 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import customtkinter as ctk
-from media_utils import collect_images, collect_videos, detect_input_kind
+from media_utils import (
+    collect_images,
+    collect_videos,
+    detect_input_kind,
+    relative_output_subdir,
+)
 
 # ── appearance ───────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
@@ -69,6 +74,7 @@ class ConvertOptions:
     video_input_size: int
     video_target_fps: int
     video_preview_seconds: int
+    recursive: bool
 
     @property
     def is_video(self) -> bool:
@@ -101,9 +107,9 @@ def _looks_like_file_path(path: str) -> bool:
     return bool(os.path.splitext(basename)[1])
 
 
-def _input_kind(path: str) -> str:
+def _input_kind(path: str, *, recursive: bool = False) -> str:
     """Return image, video, mixed, folder, missing, or unknown for a file/folder."""
-    kind = detect_input_kind(path)
+    kind = detect_input_kind(path, recursive=recursive)
     return "unknown" if kind == "empty" else kind
 
 
@@ -553,6 +559,14 @@ class ConvertTab(ctk.CTkFrame):
             self._output_var,
             "converted",
         )
+        self._recursive_var = ctk.BooleanVar(value=False)
+        self._recursive_chk = ctk.CTkCheckBox(
+            paths,
+            text="Include files in subfolders (preserve structure)",
+            variable=self._recursive_var,
+            command=self._refresh_input_type,
+        )
+        self._recursive_chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
@@ -711,6 +725,7 @@ class ConvertTab(ctk.CTkFrame):
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
             self._output_entry, self._output_browse_btn,
+            self._recursive_chk,
             self._size_menu, self._fmt_menu, self._method_menu, self._sbs_mode_menu,
             self._depth_only_chk, self._depth_scale_slider, self._blur_slider,
             self._conv_slider, self._video_max_res_menu, self._video_input_size_menu,
@@ -771,7 +786,7 @@ class ConvertTab(ctk.CTkFrame):
             self._apply_input_kind("image")
 
     def _detected_input_kind(self) -> str:
-        return _input_kind(self._input_var.get())
+        return _input_kind(self._input_var.get(), recursive=self._recursive_var.get())
 
     def _apply_input_kind(self, kind: str) -> None:
         if kind == "image":
@@ -851,6 +866,7 @@ class ConvertTab(ctk.CTkFrame):
             video_input_size=_video_option_int(self._video_input_size_var.get()),
             video_target_fps=_video_option_int(self._video_target_fps_var.get()),
             video_preview_seconds=preview_seconds,
+            recursive=self._recursive_var.get(),
         )
         threading.Thread(
             target=self._worker,
@@ -891,8 +907,8 @@ class ConvertTab(ctk.CTkFrame):
             from convert import get_device, convert_one
 
             device    = get_device()
-            image_files = collect_images(opts.input_path) if not opts.is_video else []
-            video_files = collect_videos(opts.input_path) if opts.input_kind in {"video", "mixed"} else []
+            image_files = collect_images(opts.input_path, recursive=opts.recursive) if not opts.is_video else []
+            video_files = collect_videos(opts.input_path, recursive=opts.recursive) if opts.input_kind in {"video", "mixed"} else []
             total_files = len(image_files) + len(video_files)
             if total_files == 0:
                 raise ValueError(f"No supported images or videos found in {opts.input_path}")
@@ -916,9 +932,12 @@ class ConvertTab(ctk.CTkFrame):
                     control()
                     q.put(("progress", processed_files, total_files))
                     q.put(("log",
-                           f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}"))
+                           f"[{processed_files + 1}/{total_files}] {path}"))
+                    file_output = os.path.join(
+                        opts.output_dir, relative_output_subdir(opts.input_path, path)
+                    )
                     ok = convert_one(
-                        model, path, opts.output_dir,
+                        model, path, file_output,
                         device, dtype, is_metric,
                         depth_only=opts.depth_only,
                         depth_input_scale=0.5,
@@ -960,10 +979,13 @@ class ConvertTab(ctk.CTkFrame):
                     control()
                     q.put(("progress", processed_files, total_files))
                     q.put(("log",
-                           f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}"))
+                           f"[{processed_files + 1}/{total_files}] {path}"))
+                    file_output = os.path.join(
+                        opts.output_dir, relative_output_subdir(opts.input_path, path)
+                    )
                     ok = convert_video_to_sbs(
                         video_path=path,
-                        output_dir=opts.output_dir,
+                        output_dir=file_output,
                         model=model, device=device,
                         dtype=dtype, is_metric=is_metric,
                         sbs_method=opts.method,
@@ -986,7 +1008,7 @@ class ConvertTab(ctk.CTkFrame):
                     )
                     suffix = "depth" if opts.depth_only else "SBS_LR"
                     output_path = os.path.join(
-                        opts.output_dir,
+                        file_output,
                         f"{os.path.splitext(os.path.basename(path))[0]}_{suffix}{os.path.splitext(path)[1]}",
                     )
                     report["files"].append({
@@ -1111,7 +1133,15 @@ class UpscaleTab(ctk.CTkFrame):
             textvariable=self._input_type_var,
             text_color="#aaa",
             anchor="w",
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+        self._recursive_var = ctk.BooleanVar(value=False)
+        self._recursive_chk = ctk.CTkCheckBox(
+            paths,
+            text="Include files in subfolders (preserve structure)",
+            variable=self._recursive_var,
+            command=self._refresh_input_type,
+        )
+        self._recursive_chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
         self._input_var.trace_add("write", lambda *_: self._refresh_input_type())
 
         opts = ctk.CTkFrame(self)
@@ -1145,6 +1175,7 @@ class UpscaleTab(ctk.CTkFrame):
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
             self._output_entry, self._output_browse_btn,
+            self._recursive_chk,
             self._target_menu, self._tile_menu, self._format_menu,
         ])
         self._refresh_input_type()
@@ -1189,7 +1220,8 @@ class UpscaleTab(ctk.CTkFrame):
         self._log.clear()
         self._log.start_spin()
         opts = (inp, out, self.TARGETS[self._target_var.get()],
-                int(self._tile_var.get()), self._format_var.get())
+                int(self._tile_var.get()), self._format_var.get(),
+                self._recursive_var.get())
         threading.Thread(
             target=self._worker,
             args=(*opts, self._stop_event, self._pause_event),
@@ -1197,7 +1229,7 @@ class UpscaleTab(ctk.CTkFrame):
         ).start()
 
     def _refresh_input_type(self) -> None:
-        kind = _input_kind(self._input_var.get())
+        kind = _input_kind(self._input_var.get(), recursive=self._recursive_var.get())
         if kind == "video":
             self._input_type_var.set("Video detected — will upscale video frames and preserve audio.")
             self._format_menu.configure(state="disabled")
@@ -1244,6 +1276,7 @@ class UpscaleTab(ctk.CTkFrame):
         target,
         tile,
         output_format,
+        recursive,
         stop_event: threading.Event,
         pause_event: threading.Event,
     ):
@@ -1256,9 +1289,9 @@ class UpscaleTab(ctk.CTkFrame):
                 upscale_file,
                 upscale_video,
             )
-            kind = _input_kind(inp)
-            image_files = collect_images(inp) if kind in {"image", "mixed"} else []
-            video_files = collect_videos(inp) if kind in {"video", "mixed"} else []
+            kind = _input_kind(inp, recursive=recursive)
+            image_files = collect_images(inp, recursive=recursive) if kind in {"image", "mixed"} else []
+            video_files = collect_videos(inp, recursive=recursive) if kind in {"video", "mixed"} else []
             total_files = len(image_files) + len(video_files)
             if total_files == 0:
                 raise ValueError(f"No supported images or videos found in {inp}")
@@ -1273,10 +1306,11 @@ class UpscaleTab(ctk.CTkFrame):
             for path in image_files:
                 control()
                 self._q.put(("progress", processed_files, total_files))
-                log(f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}")
+                log(f"[{processed_files + 1}/{total_files}] {path}")
+                file_output = os.path.join(out, relative_output_subdir(inp, path))
                 target_box = target if isinstance(target, tuple) else None
                 long_edge = target if isinstance(target, int) else max(target)
-                upscale_file(path, out, engine, long_edge, output_format, log,
+                upscale_file(path, file_output, engine, long_edge, output_format, log,
                              target_box=target_box, control=control)
                 processed_files += 1
                 control()
@@ -1284,12 +1318,13 @@ class UpscaleTab(ctk.CTkFrame):
             for video_index, path in enumerate(video_files):
                 control()
                 self._q.put(("progress", processed_files, total_files))
-                log(f"[{processed_files + 1}/{total_files}] {os.path.basename(path)}")
+                log(f"[{processed_files + 1}/{total_files}] {path}")
+                file_output = os.path.join(out, relative_output_subdir(inp, path))
                 target_box = target if isinstance(target, tuple) else None
                 long_edge = target if isinstance(target, int) else max(target)
                 upscale_video(
                     path,
-                    out,
+                    file_output,
                     engine,
                     long_edge,
                     target_box=target_box,
@@ -1400,6 +1435,13 @@ class JudgeTab(ctk.CTkFrame):
             self._output_var,
             "judged",
         )
+        self._recursive_var = ctk.BooleanVar(value=False)
+        self._recursive_chk = ctk.CTkCheckBox(
+            paths,
+            text="Include files in subfolders (preserve structure)",
+            variable=self._recursive_var,
+        )
+        self._recursive_chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         # ── options ───────────────────────────────────────────────────────────
         opts = ctk.CTkFrame(self)
@@ -1533,7 +1575,7 @@ class JudgeTab(ctk.CTkFrame):
         )
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
-            self._output_entry, self._output_browse_btn, self._move_chk,
+            self._output_entry, self._output_browse_btn, self._recursive_chk, self._move_chk,
             self._deep_scan_chk, self._strict_offline_chk, self._adv_toggle_btn,
             self._backend_entry, self._backend_model_menu, self._backend_model_refresh_btn,
             self._backend_api_key_entry,
@@ -1741,6 +1783,7 @@ class JudgeTab(ctk.CTkFrame):
             move_files=self._move_var.get(),
             deep_scan=self._deep_scan_var.get(),
             strict_offline=self._strict_offline_var.get(),
+            recursive=self._recursive_var.get(),
         )
         threading.Thread(
             target=self._worker,
@@ -1790,7 +1833,7 @@ class JudgeTab(ctk.CTkFrame):
             classify_image_with_backend = qc_module.classify_image_with_backend
             QCSettings = qc_module.QCSettings
 
-            images = collect_images(opts["input_path"])
+            images = collect_images(opts["input_path"], recursive=opts["recursive"])
             if not images:
                 q.put(("error",
                        f"No images found in {opts['input_path']}"))
@@ -1821,7 +1864,8 @@ class JudgeTab(ctk.CTkFrame):
                 control()
                 q.put(("progress", i, len(images)))
                 q.put(("log",
-                       f"[{i+1}/{len(images)}] {os.path.basename(path)}"))
+                       f"[{i+1}/{len(images)}] {path}"))
+                relative_dir = relative_output_subdir(opts["input_path"], path)
                 try:
                     if use_backend:
                         r = classify_image_with_backend(
@@ -1829,12 +1873,14 @@ class JudgeTab(ctk.CTkFrame):
                             model_name=opts["model_name"],
                             move_files=opts["move_files"],
                             api_key=opts["api_key"],
+                            relative_dir=relative_dir,
                         )
                     else:
                         r = classify_image(
                             path, opts["output_dir"],
                             move_files=opts["move_files"],
                             settings=settings,
+                            relative_dir=relative_dir,
                         )
                 except Exception as exc:
                     r = {
@@ -1975,6 +2021,13 @@ class OrganizeTab(ctk.CTkFrame):
             self._output_var,
             "organized",
         )
+        self._recursive_var = ctk.BooleanVar(value=False)
+        self._recursive_chk = ctk.CTkCheckBox(
+            paths,
+            text="Include files in subfolders (preserve structure)",
+            variable=self._recursive_var,
+        )
+        self._recursive_chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         opts = ctk.CTkFrame(self)
         opts.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
@@ -2047,7 +2100,7 @@ class OrganizeTab(ctk.CTkFrame):
         self._move_chk.grid(row=5, column=0, columnspan=4, sticky="w", padx=8, pady=4)
         self._run_locked_widgets.extend([
             self._input_entry, self._input_file_btn, self._input_folder_btn,
-            self._output_entry, self._output_browse_btn, self._labels_entry,
+            self._output_entry, self._output_browse_btn, self._recursive_chk, self._labels_entry,
             self._backend_entry, self._model_menu, self._model_refresh_btn, self._api_key_entry,
             self._move_chk,
         ])
@@ -2210,6 +2263,7 @@ class OrganizeTab(ctk.CTkFrame):
             "model_name": model_name,
             "api_key": self._api_key_var.get().strip() or None,
             "move_files": self._move_var.get(),
+            "recursive": self._recursive_var.get(),
         }
         threading.Thread(
             target=self._worker,
@@ -2253,7 +2307,9 @@ class OrganizeTab(ctk.CTkFrame):
         try:
             import qc_pipeline as qc_module
             qc_module = importlib.reload(qc_module)
-            images = qc_module.collect_images(opts["input_path"])
+            images = qc_module.collect_images(
+                opts["input_path"], recursive=opts["recursive"]
+            )
             if not images:
                 raise FileNotFoundError(f"No images found in {opts['input_path']}")
 
@@ -2268,7 +2324,8 @@ class OrganizeTab(ctk.CTkFrame):
             for index, path in enumerate(images):
                 control()
                 q.put(("progress", index, len(images)))
-                q.put(("log", f"[{index + 1}/{len(images)}] {os.path.basename(path)}"))
+                q.put(("log", f"[{index + 1}/{len(images)}] {path}"))
+                relative_dir = relative_output_subdir(opts["input_path"], path)
                 try:
                     result = qc_module.classify_image_with_labels(
                         path,
@@ -2278,6 +2335,7 @@ class OrganizeTab(ctk.CTkFrame):
                         model_name=opts["model_name"],
                         move_files=opts["move_files"],
                         api_key=opts["api_key"],
+                        relative_dir=relative_dir,
                     )
                 except Exception as exc:
                     result = {

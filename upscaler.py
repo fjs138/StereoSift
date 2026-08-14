@@ -15,7 +15,7 @@ import imageio
 import numpy as np
 from PIL import Image, ImageOps
 
-from media_utils import collect_images, collect_videos
+from media_utils import collect_images, collect_videos, relative_output_subdir
 
 MODEL_URL = (
     "https://github.com/xinntao/Real-ESRGAN/releases/download/"
@@ -368,10 +368,12 @@ def main() -> int:
     parser.add_argument("--format", choices=("PNG", "JPEG"), default="PNG")
     parser.add_argument("--max-seconds", type=float, default=-1,
                         help="For video inputs, process only this many seconds (-1 = full video)")
+    parser.add_argument("--recursive", action="store_true",
+                        help="Process supported files in subfolders and preserve their structure")
     args = parser.parse_args()
     try:
-        video_files = collect_videos(args.input)
-        image_files = collect_images(args.input)
+        video_files = collect_videos(args.input, recursive=args.recursive)
+        image_files = collect_images(args.input, recursive=args.recursive)
     except FileNotFoundError:
         parser.error(f"Input not found: {args.input}")
     if not image_files and not video_files:
@@ -379,12 +381,14 @@ def main() -> int:
     engine = RealESRGANx2(ensure_model(), tile=args.tile)
     target_box = (2064, 2208) if args.quest_3_sbs else None
     for path in image_files:
-        upscale_file(path, args.output_dir, engine, args.long_edge, args.format,
+        output_dir = os.path.join(args.output_dir, relative_output_subdir(args.input, path))
+        upscale_file(path, output_dir, engine, args.long_edge, args.format,
                      target_box=target_box)
     for path in video_files:
+        output_dir = os.path.join(args.output_dir, relative_output_subdir(args.input, path))
         upscale_video(
             path,
-            args.output_dir,
+            output_dir,
             engine,
             args.long_edge,
             target_box=target_box,

@@ -154,19 +154,22 @@ Visible tabs:
 
 * Judge sorts a folder of images into pass, warning, and fail. It shows scores,
   person counts, issues, and optional structural notes when the fallback scan is on.
+  Recursive input preserves the source subfolder structure under each status.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
 * Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
+  Recursive input preserves the source subfolder structure under each label.
 * Upscale runs tiled Real-ESRGAN x2plus on one image/video or a folder. Images
   save as PNG/JPEG; videos are upscaled frame-by-frame, re-encoded, and keep
-  audio when possible.
+  audio when possible. Recursive input preserves the source subfolder structure.
 * Convert turns 2D images or videos into SBS 3D. It detects whether your chosen
   file/folder contains images, videos, or both and routes each file to the right
   handler. For videos, it keeps the original resolution by default and exposes
   optional max size, depth input size, output FPS, and a first-5-seconds preview
-  before committing to a long clip.
+  before committing to a long clip. Recursive input preserves the source
+  subfolder structure.
 * Tools / Rename exists as a hidden maintenance panel only. Set
   `SANITIZE_DISPLAY = True` in `gui.py` to show it for cleanup or filename
   anonymizing work.

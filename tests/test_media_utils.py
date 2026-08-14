@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from media_utils import collect_images, collect_videos, detect_input_kind
+from media_utils import (
+    collect_images,
+    collect_videos,
+    detect_input_kind,
+    relative_output_subdir,
+)
 
 
 class TestMediaUtils(unittest.TestCase):
@@ -34,6 +39,21 @@ class TestMediaUtils(unittest.TestCase):
 
             self.assertEqual(collect_images(str(root)), [str(image)])
             self.assertEqual(collect_videos(str(root)), [str(video)])
+
+    def test_recursive_collectors_include_nested_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "nested"
+            nested.mkdir()
+            image = nested / "photo.jpg"
+            video = nested / "clip.mp4"
+            image.write_bytes(b"fake")
+            video.write_bytes(b"fake")
+
+            self.assertEqual(collect_images(str(root), recursive=True), [str(image)])
+            self.assertEqual(collect_videos(str(root), recursive=True), [str(video)])
+            self.assertEqual(detect_input_kind(str(root), recursive=True), "mixed")
+            self.assertEqual(relative_output_subdir(str(root), str(image)), "nested")
 
 
 if __name__ == "__main__":

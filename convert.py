@@ -13,7 +13,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from depth_model import AVAILABLE_MODELS, load_depth_model
-from media_utils import collect_images, collect_videos
+from media_utils import collect_images, collect_videos, relative_output_subdir
 from sbs.sbs import process_image_sbs, process_image_anaglyph
 
 
@@ -242,6 +242,8 @@ def main():
     parser.add_argument("--max-res", type=int, default=1280, help="Max resolution dimension.")
     parser.add_argument("--video-input-size", type=int, default=518,
                         help="Resolution fed to Video Depth Anything.")
+    parser.add_argument("--recursive", action="store_true",
+                        help="Process supported files in subfolders and preserve their structure")
     parser.add_argument("--temporal-smoothing", type=float, default=0.2,
                         help="Temporal smoothing for video (0.0-0.5).")
     parser.add_argument("--batch-size", type=int, default=16, help="Frames per batch.")
@@ -260,8 +262,8 @@ def main():
 
     ok = 0
     try:
-        videos = collect_videos(args.input)
-        images = [] if args.video else collect_images(args.input)
+        videos = collect_videos(args.input, recursive=args.recursive)
+        images = [] if args.video else collect_images(args.input, recursive=args.recursive)
     except FileNotFoundError as e:
         print(e)
         sys.exit(1)
@@ -303,10 +305,13 @@ def main():
         ) as pbar:
             for image_path in images:
                 pbar.set_postfix_str(os.path.basename(image_path)[:40], refresh=False)
+                output_dir = os.path.join(
+                    args.output_dir, relative_output_subdir(args.input, image_path)
+                )
                 if convert_one(
                     model,
                     image_path,
-                    args.output_dir,
+                    output_dir,
                     device,
                     dtype,
                     is_metric,
@@ -367,9 +372,12 @@ def main():
             for video_path in videos:
                 pbar.set_postfix_str(os.path.basename(video_path)[:40], refresh=False)
                 try:
+                    output_dir = os.path.join(
+                        args.output_dir, relative_output_subdir(args.input, video_path)
+                    )
                     if convert_video_to_sbs(
                         video_path=video_path,
-                        output_dir=args.output_dir,
+                        output_dir=output_dir,
                         model=video_model,
                         device=device,
                         dtype=video_dtype,

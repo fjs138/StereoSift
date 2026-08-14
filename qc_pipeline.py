@@ -38,7 +38,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from media_utils import collect_images as _collect_images
+from media_utils import (
+    collect_images as _collect_images,
+    relative_output_subdir,
+)
 
 try:
     import requests
@@ -590,6 +593,7 @@ def classify_image(
     output_dir: str,
     move_files: bool = False,
     settings: QCSettings | None = None,
+    relative_dir: str = "",
 ) -> Dict[str, Any]:
     """Classify one image and route it to pass/warning/fail.
 
@@ -684,7 +688,9 @@ def classify_image(
     os.makedirs(output_dir, exist_ok=True)
     for folder in ("pass", "warning", "fail"):
         os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
-    destination = _route_image(image_path, output_dir, status, move_files)
+    destination = _route_image(
+        image_path, output_dir, status, move_files, relative_dir=relative_dir
+    )
 
     return {
         "filename":     os.path.basename(image_path),
@@ -883,6 +889,7 @@ def classify_image_with_backend(
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
     api_key: Optional[str] = None,
+    relative_dir: str = "",
 ) -> Dict[str, Any]:
     """Classify one image via an OpenAI-compatible vision backend."""
     img_url = _image_data_url(image_path)
@@ -974,6 +981,7 @@ def classify_image_with_backend(
         route_folder,
         move_files,
         sibling_folders=["pass", "warning", "fail", "unscored"],
+        relative_dir=relative_dir,
     )
 
     return {
@@ -996,6 +1004,7 @@ def classify_image_with_labels(
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
     api_key: Optional[str] = None,
+    relative_dir: str = "",
 ) -> Dict[str, Any]:
     """Classify one image into one of the provided labels via a vision backend."""
     clean_labels = validate_organizer_labels(labels)
@@ -1087,6 +1096,7 @@ def classify_image_with_labels(
         label,
         move_files,
         sibling_folders=clean_labels,
+        relative_dir=relative_dir,
     )
 
     return {
@@ -1105,9 +1115,9 @@ def classify_image_with_labels(
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def collect_images(input_path: str) -> List[str]:
+def collect_images(input_path: str, *, recursive: bool = False) -> List[str]:
     try:
-        return _collect_images(input_path)
+        return _collect_images(input_path, recursive=recursive)
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Not found: {input_path}") from exc
 
@@ -1118,30 +1128,34 @@ def _route_image_to_folder(
     folder: str,
     move_files: bool,
     sibling_folders: Optional[List[str]] = None,
+    relative_dir: str = "",
 ) -> str:
     # A rerun may produce a different verdict. Remove stale copies so one image
     # can never appear in both pass and fail (or warning) at the same time.
     filename = os.path.basename(image_path)
+    relative_dir = relative_dir.strip().strip(os.sep)
+    destination_dir = os.path.join(output_dir, folder, relative_dir)
     source = os.path.abspath(image_path)
     folders = sibling_folders or []
     for sibling in folders:
-        old = os.path.abspath(os.path.join(output_dir, sibling, filename))
+        old = os.path.abspath(os.path.join(output_dir, sibling, relative_dir, filename))
         if old != source and os.path.isfile(old):
             os.unlink(old)
-    dest = os.path.join(output_dir, folder, filename)
+    dest = os.path.join(destination_dir, filename)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     (shutil.move if move_files else shutil.copy2)(image_path, dest)
     return dest
 
 
 def _route_image(image_path: str, output_dir: str,
-                 status: str, move_files: bool) -> str:
+                 status: str, move_files: bool, *, relative_dir: str = "") -> str:
     return _route_image_to_folder(
         image_path,
         output_dir,
         status,
         move_files,
         sibling_folders=["pass", "warning", "fail"],
+        relative_dir=relative_dir,
     )
 
 
@@ -1157,6 +1171,7 @@ def run_qc(
     move_files: bool = False,
     settings: QCSettings | None = None,
     api_key: Optional[str] = None,
+    recursive: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run QC on all images in ``input_path``."""
     if settings is None:
@@ -1173,20 +1188,22 @@ def run_qc(
         )
     )
     _append_run_event(output_dir, f"Run started: qc input={input_path} mode={run_mode}")
-    images = collect_images(input_path)
+    images = collect_images(input_path, recursive=recursive)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
 
     results = []
     for image_path in images:
+        relative_dir = relative_output_subdir(input_path, image_path)
         if backend_url and not settings.strict_offline:
             r = classify_image_with_backend(
                 image_path, backend_url, output_dir,
                 model_name=model_name, move_files=move_files,
-                api_key=api_key)
+                api_key=api_key, relative_dir=relative_dir)
         else:
             r = classify_image(image_path, output_dir,
-                               move_files=move_files, settings=settings)
+                               move_files=move_files, settings=settings,
+                               relative_dir=relative_dir)
         results.append(r)
 
     counts = {s: sum(1 for r in results if r["status"] == s)
@@ -1210,6 +1227,7 @@ def run_organize(
     model_name: str = "llama-3.2-11b-vision-instruct",
     move_files: bool = False,
     api_key: Optional[str] = None,
+    recursive: bool = False,
 ) -> List[Dict[str, Any]]:
     """Run image organization without emitting audit artifacts."""
     clean_labels = validate_organizer_labels(labels)
@@ -1222,12 +1240,13 @@ def run_organize(
         f"Run started: organize input={input_path} labels={', '.join(clean_labels)} "
         f"model={model_name} url={backend_url}",
     )
-    images = collect_images(input_path)
+    images = collect_images(input_path, recursive=recursive)
     if not images:
         raise FileNotFoundError(f"No images found in: {input_path}")
 
     results = []
     for image_path in images:
+        relative_dir = relative_output_subdir(input_path, image_path)
         r = classify_image_with_labels(
             image_path,
             backend_url,
@@ -1236,6 +1255,7 @@ def run_organize(
             model_name=model_name,
             move_files=move_files,
             api_key=api_key,
+            relative_dir=relative_dir,
         )
         results.append(r)
 
@@ -1273,6 +1293,8 @@ def main() -> None:
                    help="Disable backend, YOLO, and model downloads; run pixel-only QC")
     p.add_argument("--no-yolo",      action="store_true")
     p.add_argument("--move",         action="store_true")
+    p.add_argument("--recursive", action="store_true",
+                   help="Process images in subfolders and preserve their structure")
     args = p.parse_args()
 
     settings = QCSettings(
@@ -1287,7 +1309,8 @@ def main() -> None:
            model_name=args.model,
            move_files=args.move,
            settings=settings,
-           api_key=None if args.strict_offline else args.api_key)
+           api_key=None if args.strict_offline else args.api_key,
+           recursive=args.recursive)
 
 
 if __name__ == "__main__":
