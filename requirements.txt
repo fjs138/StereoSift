@@ -1,14 +1,18 @@
-customtkinter>=5.2.0
-ultralytics>=8.3
+# Lower bounds are the oldest release known to work; upper bounds stop at the
+# next major so a breaking upstream release cannot silently break an install.
+# PyTorch is not listed here — run install_torch.py to get the right build for
+# your platform and accelerator.
+customtkinter>=5.2.0,<7
+ultralytics>=8.3,<9
 transformers>=4.48,<5
-Pillow>=11.2.1
-numpy>=2.2.6
-huggingface_hub>=0.32.2
-safetensors>=0.5.3
-imageio-ffmpeg>=0.6.0
-opencv-python>=4.10
-imageio>=2.37
-requests>=2.32
-tqdm>=4.66.0
-einops>=0.4.1
-easydict>=1.13
+Pillow>=11.2.1,<13
+numpy>=2.2.6,<3
+huggingface_hub>=0.32.2,<1
+safetensors>=0.5.3,<1
+imageio-ffmpeg>=0.6.0,<1
+opencv-python>=4.10,<6
+imageio>=2.37,<3
+requests>=2.32,<3
+tqdm>=4.66.0,<5
+einops>=0.4.1,<1
+easydict>=1.13,<2
