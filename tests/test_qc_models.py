@@ -469,9 +469,9 @@ class TestQCModelDecisions(unittest.TestCase):
         self.assertIn("structurally correct", result["structure_note"])
 
     @patch("qc_pipeline._http_post")
-    def test_backend_routes_violation_language_to_violations_folder(self, mock_post):
+    def test_backend_refusal_routes_to_unscored_folder(self, mock_post):
         mock_post.return_value = {"choices": [{"message": {"content": (
-            '{"status":"pass","score":95,"note":"The structure looks normal, but the content may violate policy.","issues":["The image may be a violation of the stated policy."]}'
+            '{"status":"pass","score":95,"note":"Structure looks normal, but I cannot rate this image.","issues":["Declined: the model reported a content policy violation."]}'
         )}}]}
 
         output_dir = os.path.join(self.tmpdir, "out")

@@ -244,9 +244,9 @@ Originals are copied by default. Use `--move` only if you really want destructiv
 Local judgment is intentionally conservative. Only an explicit, confident
 structural `PASS` goes into `pass/`. Clear defects, uncertain verdicts,
 malformed responses, and scan failures land in `fail/`, which acts as the
-manual review queue. Backend responses that mention a safety/policy
-violation are routed to `unscored/` instead so they stay separate from
-ordinary structural failures. Exposure and other minor aesthetic issues do not
+manual review queue. Responses where the backend declines to return a verdict, or where scoring
+otherwise fails, are routed to `unscored/` so an unrated image is never
+confused with an actual structural failure. Exposure and other minor aesthetic issues do not
 affect the verdict.
 
 ### QC Pipeline Layers

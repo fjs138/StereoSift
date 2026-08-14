@@ -2,7 +2,7 @@
 """StereoSift — CustomTkinter GUI.
 
 Four main tabs:
-  • Judge          — local QC: pass / warning / fail / violations sorting
+  • Judge          — local QC: pass / warning / fail / unscored sorting
   • Organize       — vision-model sorting into user-defined folders
   • Upscale        — images → Quest-ready high resolution
   • Convert        — 2D images / videos → SBS 3D
@@ -1719,7 +1719,7 @@ class JudgeTab(ctk.CTkFrame):
         processed = len(self._results)
         counts = {s: sum(1 for r in self._results if r.get("status") == s)
                   for s in ("pass", "warning", "fail")}
-        violations = sum(
+        unscored = sum(
             1 for r in self._results
             if r.get("route_folder") == "unscored"
         )
@@ -1727,7 +1727,7 @@ class JudgeTab(ctk.CTkFrame):
         self._pass_var.set(f"Pass: {counts['pass']}")
         self._warn_var.set(f"Warning: {counts['warning']}")
         self._fail_var.set(f"Fail: {counts['fail']}")
-        self._unscored_var.set(f"Unscored: {violations}")
+        self._unscored_var.set(f"Unscored: {unscored}")
         remaining = max(0, getattr(self, "_total_items", 0) - processed)
         self._remaining_var.set(f"Remaining: {remaining}")
 
@@ -1895,7 +1895,7 @@ class JudgeTab(ctk.CTkFrame):
 
             counts = {s: sum(1 for r in results if r["status"] == s)
                       for s in ("pass", "warning", "fail")}
-            violations = sum(
+            unscored = sum(
                 1 for r in results if r.get("route_folder") == "unscored"
             )
             q.put(("done",
@@ -1903,7 +1903,7 @@ class JudgeTab(ctk.CTkFrame):
                    f"✓ {counts['pass']} pass   "
                    f"⚠ {counts['warning']} warning   "
                    f"✗ {counts['fail']} fail   "
-                   f"⛔ {violations} violations"))
+                   f"⛔ {unscored} violations"))
         except _RunCancelled:
             q.put(("stopped", "QC cancelled by user. Partial results were kept."))
         except Exception:
