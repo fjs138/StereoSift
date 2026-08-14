@@ -28,7 +28,6 @@ across separate scripts and tools:
 * AI upscaling for headset-ready or high-resolution exports
 * Batch image QC for exposure, structure, and structural artifacts
 * Vision-assisted folder organization with your own label set
-* Optional hidden maintenance tools for cleanup and compact renaming
 
 It is designed for local-first workflows where you want a GUI, repeatability,
 and the option to stay fully offline.
@@ -65,7 +64,6 @@ and the option to stay fully offline.
 * Support a strict offline mode that stays local and skips model-backed checks.
 * Optionally connect to a local OpenAI-compatible vision backend if you already have one running.
 * Sort images into arbitrary user-defined categories such as `outdoors, indoors`.
-* Keep local cleanup and filename anonymizing available as a hidden maintenance panel.
 
 ## How It Works
 
@@ -87,21 +85,12 @@ local moondream2 scan.
 Strict offline mode turns off YOLO, deep scan, and backend calls entirely. That
 is the safest choice if you want no network-capable behavior at all.
 
-The maintenance/rename panel is hidden from the normal GUI by default. If
-enabled in code, cleanup removes local caches, reports, and assistant state from
-a selected folder. Its optional renaming tool was built for image generators
-such as Draw Things, which can assign extremely long, visually similar
-filenames to every image in a batch. It replaces those names with short, unique
-lowercase alphanumeric names while preserving file extensions, making large
-folders much easier to browse and manage.
-
 ## Example Workflows
 
 * Turn a flat photo or short clip into SBS 3D for headset viewing.
 * Upscale a folder of rendered images, product shots, or video clips to a consistent target size.
 * Triage AI-generated portraits or character images for obvious structural defects.
 * Organize a mixed image dump into labels like `indoors`, `outdoors`, `pets`, or `reference`.
-* Optionally enable the hidden maintenance panel to rename long Draw Things filenames.
 
 ## Structure of Project
 
@@ -115,7 +104,6 @@ folders much easier to browse and manage.
 | `video_converter.py` | Video Depth Anything streaming and encoding |
 | `sbs/sbs.py` | SBS warping and conversion helpers |
 | `tests/` | Automated tests |
-| `sanitizer.py` | Workspace cleanup and compact filename helpers |
 | `models/` | Downloaded checkpoints |
 | `video_depth_anything_repo/` | Vendored Video Depth Anything code |
 | `depth_anything_v2/` | Depth Anything V2 implementation |
@@ -170,9 +158,6 @@ Visible tabs:
   optional max size, depth input size, output FPS, and a first-5-seconds preview
   before committing to a long clip. Recursive input preserves the source
   subfolder structure.
-* Tools / Rename exists as a hidden maintenance panel only. Set
-  `SANITIZE_DISPLAY = True` in `gui.py` to show it for cleanup or filename
-  anonymizing work.
 
 ## SBS Conversion
 
