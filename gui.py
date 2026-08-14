@@ -2435,8 +2435,6 @@ class OrganizeTab(ctk.CTkFrame):
         self.after(100, self._poll)
 
 
-# ── Sanitize tab ──────────────────────────────────────────────────────────────
-
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()

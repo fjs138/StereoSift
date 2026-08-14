@@ -630,7 +630,7 @@ def classify_image(
     contrast   = stats["contrast"]
 
     # Exposure and contrast are recorded for diagnostics only. They do not
-    # influence structural-structure judgment.
+    # influence structural-anatomy judgment.
 
     # ── 2. Pose structure gate ──────────────────────────────────────────────────
     if settings.strict_offline:

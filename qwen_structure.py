@@ -1,4 +1,4 @@
-"""Experimental local Qwen3-VL structural-structure judge.
+"""Experimental local Qwen3-VL structural-anatomy judge.
 
 WIP / reference-only code: this module is intentionally inert in the app unless
 someone imports or runs it directly. It has no dependency on the GUI, converter,
@@ -28,10 +28,10 @@ MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8001/v1"
 DEFAULT_BACKEND_MODEL = "Qwen3.6-35B-A3B-MLX-4bit"
 
-STRUCTURE_PROMPT = """Act as a conservative structural-structure quality inspector.
+STRUCTURE_PROMPT = """Act as a conservative structural-anatomy quality inspector.
 
 Your only job is to decide whether visible human bodies have major structural
-structure defects. Ignore scene meaning, artistic intent, clothing, style, lighting,
+defects. Ignore scene meaning, artistic intent, clothing, style, lighting,
 and background. Do not mention or classify any
 non-structure subject matter.
 
