@@ -32,6 +32,20 @@ across separate scripts and tools:
 It is designed for local-first workflows where you want a GUI, repeatability,
 and the option to stay fully offline.
 
+## Screenshots
+
+Four tabs, one window. Everything runs on your machine.
+
+| Judge | Organize |
+| :-- | :-- |
+| ![Judge tab — batch image QC sorting into pass, warning, fail, and review](assets/judge.png) | ![Organize tab — vision-model sorting into your own category labels](assets/organize.png) |
+| Batch QC routes each image to `pass`, `warning`, `fail`, or a review queue. | A vision model picks exactly one of your labels per image. |
+
+| Upscale | Convert |
+| :-- | :-- |
+| ![Upscale tab — Real-ESRGAN upscaling with headset-ready targets](assets/upscale.png) | ![Convert tab — 2D to SBS 3D conversion with depth controls](assets/convert.png) |
+| Real-ESRGAN x2plus with tiled inference and aspect-safe target sizes. | Depth-based 2D to SBS 3D, with strength, blur, and convergence controls. |
+
 ## Technology Stack
 
 | Technology | Use | Description |
