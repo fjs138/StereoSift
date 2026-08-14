@@ -457,17 +457,13 @@ def process_video_sbs(
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
-    except Exception:
+        memmap.flush()
+        print("Building final tensor from memmap…")
+        final_tensor = torch.from_numpy(np.array(memmap)).to(_STEREO_DTYPE)
+    finally:
+        # Drop the mapping before unlinking; Windows refuses to remove a mapped file.
         del memmap
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-        raise
-
-    memmap.flush()
-    print("Building final tensor from memmap…")
-    final_tensor = torch.from_numpy(np.array(memmap)).to(_STEREO_DTYPE)
-    del memmap
-    if os.path.exists(tmp_path):
-        os.remove(tmp_path)
 
     return (final_tensor,)
