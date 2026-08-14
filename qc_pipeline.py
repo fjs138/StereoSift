@@ -884,8 +884,27 @@ def validate_organizer_labels(labels: List[str]) -> List[str]:
     return clean_labels
 
 
+_REFUSAL_MARKERS = (
+    "violation",
+    "cannot assist",
+    "can't assist",
+    "unable to provide",
+    "unable to assist",
+    "i cannot",
+    "i can't",
+    "against policy",
+    "content policy",
+)
+
+
 def _looks_like_model_refusal(text: str) -> bool:
-    return "violation" in text.lower()
+    """True when the backend declined to return a verdict.
+
+    Matches phrasing the model itself emits when it will not answer, so the
+    image can be routed to ``unscored/`` rather than scored as a failure.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in _REFUSAL_MARKERS)
 
 
 def classify_image_with_backend(
