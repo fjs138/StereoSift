@@ -158,7 +158,7 @@ Visible tabs:
   Recursive input preserves the source subfolder structure under each status.
 * Judge also has a strict offline toggle that keeps everything local and blocks
   backend/model-backed checks.
-* Organize accepts choices such as `outdoors, indoors` or `color, black-and-white`, asks
+* Organize accepts choices such as `outdoors, indoors` or `places, people`, asks
   your oMLX/LM Studio vision model for the best match, and creates one output
   subfolder per label. It copies by default and can optionally move originals.
   Recursive input preserves the source subfolder structure under each label.
