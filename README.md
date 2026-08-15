@@ -85,10 +85,11 @@ Four tabs, one window. Everything runs on your machine.
                                               │  OR (mutually exclusive)    │
                                               ▼                             ▼
                                     ┌───────────────────┐        ┌──────────────────┐
-                                    │ local model path  │        │ OpenAI-compatible│
-                                    │ (default offline) │        │ vision backend   │
-                                    └───────────────────┘        │ LM Studio / oMLX │
-                                                                 └──────────────────┘
+                                    │ OpenAI-compatible │        │ local model path │
+                                    │ vision backend    │        │ (CLI default;    │
+                                    │ LM Studio / oMLX  │        │  clear URL in GUI)│
+                                    │ (GUI default)     │        └──────────────────┘
+                                    └───────────────────┘
 ```
 
 Every tab is a thin GUI layer over a module that also runs standalone from the
@@ -98,23 +99,35 @@ recursive structure is preserved.
 
 ### QC routing policy
 
-Judge has two mutually exclusive paths. With a backend URL configured, each image
-gets a single judgment from an OpenAI-compatible vision model. Clear the URL and
-it falls back to local models: pixel heuristics always, YOLO subject detection by
-default, and an optional moondream2 deep scan for duplicated or incorrectly
-joined structures.
+Judge has two mutually exclusive paths:
 
-Local judgment is deliberately conservative:
+**Vision backend** — GUI default (URL pre-filled); CLI with `--backend-url`:
 
 | Outcome | Routed to |
 | :-- | :-- |
-| Explicit, confident structural pass | `pass/` |
-| Clear defect, uncertain verdict, malformed response, or scan failure | `fail/` — the manual review queue |
-| Backend declined to return a verdict, or scoring failed | `unscored/` |
+| Model returns `pass` | `pass/` |
+| Model returns `warning`, or malformed JSON (batch keeps moving) | `warning/` |
+| Model returns `fail` | `fail/` |
+| No recognizable status in the reply | `unscored/` |
 
-Separating `unscored/` from `fail/` matters: an image nobody rated is not the
-same as an image that failed, and collapsing the two would silently inflate the
-failure rate.
+**Local models** — CLI default; GUI when the backend URL field is cleared:
+
+| Outcome | Routed to |
+| :-- | :-- |
+| No structural issues detected | `pass/` |
+| Major defect (uncertain cases with 3+ people become `warning`) | `fail/` |
+| Uncertain structure, or deep scan unavailable | `warning/` |
+
+Clear the backend URL (or omit `--backend-url` on the CLI) to use local models:
+pixel heuristics always, YOLO subject detection by default, and an optional
+moondream2 deep scan for duplicated or incorrectly joined structures.
+
+Separating `unscored/` from `fail/` matters on the backend path: an image nobody
+rated is not the same as an image that failed, and collapsing the two would
+silently inflate the failure rate.
+
+Strict offline mode forces the local path and additionally disables YOLO and the
+deep scan, leaving pixel-only QC with no network-capable behavior at all.
 
 Exposure and other aesthetic issues are recorded but never affect the verdict.
 
@@ -127,8 +140,7 @@ Exposure and other aesthetic issues are recorded but never affect the verdict.
 | Structural scan | moondream2 (~2 GB) | Tricky structural defects when the gate is not conclusive |
 
 The structure gate runs first on images with subjects; the moondream2 fallback
-only engages after it. Strict offline mode disables both, leaving pixel-only QC
-and no network-capable behavior at all.
+only engages after it when `--deep-scan` is enabled (off by default).
 
 ## Technology Stack
 
@@ -174,6 +186,13 @@ or pass `--strict-offline` on the CLI.
 ```bash
 python gui.py
 ```
+
+The Judge tab pre-fills `http://127.0.0.1:8001/v1` for a local oMLX or LM Studio
+server. Clear that field (or leave `--backend-url` unset on the CLI) to run fully
+local QC with YOLO instead.
+
+Interactive shell wrappers are also available if you prefer prompts over flags:
+`sh sbs.sh` for conversion and `sh qc.sh` for QC (both expect a project venv).
 
 ### SBS conversion
 
@@ -287,6 +306,8 @@ directly and is not part of the GUI, converter, or production routing policy.
 | `depth_model.py` | Depth Anything V2 loading |
 | `video_converter.py` | Video Depth Anything streaming and encoding |
 | `sbs/sbs.py` | SBS warping and conversion helpers |
+| `install_torch.py` | Platform-specific PyTorch installer |
+| `qc.sh` / `sbs.sh` | Interactive shell launchers for QC and conversion |
 | `qwen_structure.py` | Reference-only Qwen-VL benchmark path |
 | `tools/benchmark_structure.py` | Labeled-folder benchmark harness |
 | `tests/` | Automated tests |
@@ -297,9 +318,9 @@ directly and is not part of the GUI, converter, or production routing policy.
 ## Design Notes
 
 **Why local-first.** The images people run through QC and organization are often
-ones they would not upload anywhere. Defaulting to local models, and offering a
-strict mode that disables every network-capable path, makes that guarantee
-checkable rather than promised.
+ones they would not upload anywhere. The CLI defaults to local models; strict
+offline mode disables every network-capable path so that guarantee is checkable
+rather than promised.
 
 **Why copy instead of move.** A misrouted verdict on a destructive sort loses
 the original. Copying is the default and `--move` must be requested explicitly.
@@ -318,11 +339,6 @@ well and be useless.
 ## License
 
 MIT © Frank Santaguida — see [LICENSE](LICENSE).
-
-<!-- TODO: the LICENSE file currently reads "Copyright (c) 2025 yushan777",
-     carried in from a vendored upstream. Update it to your own MIT copyright
-     so it agrees with the line above, and move the upstream text into
-     THIRD_PARTY_NOTICES.md. -->
 
 StereoSift incorporates third-party code, architectures, and model checkpoints.
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution, upstream
